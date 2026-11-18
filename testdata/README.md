@@ -100,3 +100,22 @@ printf '%s  %s\n' 037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c3
 LLAMA_STORIES260K_TOKENIZER="$tokenizer_path" \
   go test ./internal/tokenizer -run '^TestStories260KTokenizerParity$' -count=1 -v
 ```
+
+## TinyStories 260K text generation
+
+`stories260k_generation.json` records the reference prompt IDs, greedy suffix
+IDs, and raw decoded suffix in hex for `Once upon a time`. The driver feeds the
+prompt IDs from position zero, then uses llama2.c's greedy argmax on the logits.
+It generates at most 16 new tokens within the remaining context and stops before
+a predicted BOS. The upstream CLI's `-n` counts forward steps, including forced
+prompt tokens. The driver decodes the suffix from the final prompt ID, and the Go
+test also checks that command stdout ends with the added newline.
+
+Use the pinned artifacts and the compile command above to rebuild the driver
+before regenerating the fixture.
+
+```sh
+"$reference_exe" generation "$model_path" "$tokenizer_path" > testdata/stories260k_generation.json
+LLAMA_STORIES260K_MODEL="$model_path" LLAMA_STORIES260K_TOKENIZER="$tokenizer_path" \
+  go test ./cmd/generate -run '^TestStories260KGeneration$' -count=1 -v
+```
