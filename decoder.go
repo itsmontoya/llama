@@ -75,17 +75,24 @@ func (d *Decoder) ForwardWithTrace(tokens []int64) (*tensor.Tensor, map[string]*
 	return logits, trace, nil
 }
 
-func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*tensor.Tensor, error) {
+func (d *Decoder) validatePrefix(tokens []int64) error {
 	if d == nil || d.embedding == nil {
-		return nil, fmt.Errorf("llama: decoder is uninitialized")
+		return fmt.Errorf("llama: decoder is uninitialized")
 	}
 	if len(tokens) == 0 || int64(len(tokens)) > d.config.MaxContext {
-		return nil, fmt.Errorf("llama: prefix length must be in [1,%d]", d.config.MaxContext)
+		return fmt.Errorf("llama: prefix length must be in [1,%d]", d.config.MaxContext)
 	}
 	for position, token := range tokens {
 		if token < 0 || token >= d.config.VocabSize {
-			return nil, fmt.Errorf("llama: token at position %d is out of range: %d", position, token)
+			return fmt.Errorf("llama: token at position %d is out of range: %d", position, token)
 		}
+	}
+	return nil
+}
+
+func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*tensor.Tensor, error) {
+	if err := d.validatePrefix(tokens); err != nil {
+		return nil, err
 	}
 	x, err := gather(d.embedding, tokens, 0)
 	if err != nil {
