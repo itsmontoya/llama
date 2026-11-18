@@ -11,6 +11,48 @@ RMSNorm, ordinary adjacent-pair RoPE, causal MHA/GQA/MQA, residual blocks, and
 SwiGLU. Dimensions, FFN width, epsilon, RoPE base, context limit, and tied output
 weights are explicit configuration.
 
+## Generate text with TinyStories 260K
+
+From this directory, with Go 1.26.1 or later, download the pinned FP32
+checkpoint and its matching 512-piece vocabulary into a temporary directory.
+Verify both SHA-256 checksums before running the command.
+
+```sh
+artifact_dir=$(mktemp -d)
+model_path="$artifact_dir/stories260K.bin"
+tokenizer_path="$artifact_dir/tok512.bin"
+artifact_url=https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K
+
+curl -fL -o "$model_path" "$artifact_url/stories260K.bin"
+curl -fL -o "$tokenizer_path" "$artifact_url/tok512.bin"
+printf '%s  %s\n' \
+  b0a507e7ad0f626624f17112325e66691f9076d622e1d3274d103d00299f2696 "$model_path" \
+  037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c312 "$tokenizer_path" \
+  | shasum -a 256 -c
+```
+
+```sh
+go run ./cmd/generate \
+  -model "$model_path" -tokenizer "$tokenizer_path" \
+  -prompt 'Once upon a time' -max-new-tokens 16
+
+CGO_ENABLED=0 go run -tags=purego ./cmd/generate \
+  -model "$model_path" -tokenizer "$tokenizer_path" \
+  -prompt 'Once upon a time' -max-new-tokens 16
+```
+
+Both CPU builds print the continuation followed by a newline.
+
+```text
+, there was a little girl named Lily. She loved to play
+```
+
+`-max-new-tokens` defaults to 16. The encoded prompt, including its initial
+BOS token, and the generated tokens share this checkpoint's 512-token context.
+A prompt longer than 512 tokens is an error. Generation stops at the first BOS
+prediction or when either token limit is reached. A full-context prompt or a
+zero budget prints an empty line. An empty `-prompt` starts from BOS alone.
+
 ## Run the numerical example
 
 From this directory, with Go 1.26.1 or later:
@@ -82,9 +124,9 @@ materializes full attention-score matrices. Configuration checks integer/byte
 representability, not a total memory budget. Finite input weights still follow
 ordinary FP32 overflow/nonfinite arithmetic during execution.
 
-KV caching, chunked prefill with offsets, scaled/split-half RoPE, checkpoint
-formats, tokenization, sampling policies, reduced precision, and practical model
-performance remain future work. Synthetic fixture parity establishes this
-computation only; no real Llama checkpoint compatibility is claimed. The next
-backend milestone is bounded per-layer KV storage and cached/full-prefix parity.
+KV caching, chunked prefill with offsets, scaled/split-half RoPE, additional
+checkpoint and tokenizer formats, stochastic sampling, reduced precision, and
+practical model performance remain future work. Compatibility is verified for
+the pinned TinyStories 260K checkpoint and its tokenizer. The next backend
+milestone is bounded per-layer KV storage and cached/full-prefix parity.
 The detailed remaining library work is tracked in [NEEDS.md](NEEDS.md).
