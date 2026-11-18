@@ -49,6 +49,11 @@ type Decoder struct {
 	blocks                  []blockWeights
 }
 
+// Config returns the decoder's resolved configuration by value.
+func (d *Decoder) Config() Config {
+	return d.config
+}
+
 // Forward returns owned logits [len(tokens),VocabSize], before vocabulary
 // softmax. Tokens must be in [0,VocabSize), with 1 <= len <= MaxContext.
 // Positions start at zero on every call. Outputs survive later calls; callers
