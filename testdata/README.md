@@ -167,6 +167,12 @@ ID, the top eight logits with the top-two margin, and logits at 32 evenly
 spaced vocabulary IDs plus the special IDs and top candidates. Generated
 step prefixes are stored verbatim so a failed position can be replayed.
 
+The pinned file has 146 BF16 tensors with 1,235,814,400 parameters. The
+classifier shares the embedding weights. The frozen reference uses one CPU
+thread for each of intra-op and inter-op work on an Apple M3 running macOS
+26.5.2. Its eight-token continuation of `The capital of France is` is
+`Paris. It is the most populous city`, preceded by one space.
+
 The oracle uses CPU FP32 with eager attention and recomputes the full
 prefix for each prediction. It selects the highest raw logit, breaks ties
 by lowest token ID, stops before a selected EOS, and decodes only the suffix.
