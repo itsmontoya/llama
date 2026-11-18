@@ -99,7 +99,7 @@ func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*ten
 		return nil, fmt.Errorf("llama: embedding: %w", err)
 	}
 	record(trace, "embedding", x)
-	cosine, sine, err := rotaryTables(int64(len(tokens)), d.config.Dim/d.config.Heads, d.config.RopeTheta)
+	cosine, sine, err := rotaryTables(0, int64(len(tokens)), d.config)
 	if err != nil {
 		return nil, err
 	}
