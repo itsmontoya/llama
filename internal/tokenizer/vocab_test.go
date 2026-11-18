@@ -91,25 +91,9 @@ func TestLoadRejectsMalformedVocabulary(t *testing.T) {
 }
 
 func TestStories260KVocabulary(t *testing.T) {
-	path := os.Getenv("LLAMA_STORIES260K_TOKENIZER")
-	if path == "" {
-		t.Skip("set LLAMA_STORIES260K_TOKENIZER to the pinned tok512.bin")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const wantHash = "037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c312"
-	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != wantHash {
-		t.Fatalf("tokenizer SHA-256 = %s, want %s", got, wantHash)
-	}
-	const vocabSize = 512 // The vocabulary size in the pinned Stories260K checkpoint.
-	vocab, err := Load(path, vocabSize)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(vocab.entries) != vocabSize {
-		t.Fatalf("loaded %d entries, want %d", len(vocab.entries), vocabSize)
+	vocab := loadStories260KTokenizer(t)
+	if len(vocab.entries) != stories260KVocabSize {
+		t.Fatalf("loaded %d entries, want %d", len(vocab.entries), stories260KVocabSize)
 	}
 	for _, test := range []struct {
 		id    int64
@@ -126,6 +110,29 @@ func TestStories260KVocabulary(t *testing.T) {
 			t.Errorf("token %d = %q with score %v, want %q with score %v", test.id, got.piece, got.score, test.entry.piece, test.entry.score)
 		}
 	}
+}
+
+const stories260KVocabSize = 512 // The vocabulary size in the pinned Stories260K checkpoint.
+
+func loadStories260KTokenizer(t *testing.T) *Tokenizer {
+	t.Helper()
+	path := os.Getenv("LLAMA_STORIES260K_TOKENIZER")
+	if path == "" {
+		t.Skip("set LLAMA_STORIES260K_TOKENIZER to the pinned tok512.bin")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantHash = "037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c312"
+	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != wantHash {
+		t.Fatalf("tokenizer SHA-256 = %s, want %s", got, wantHash)
+	}
+	vocab, err := Load(path, stories260KVocabSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vocab
 }
 
 func testEntries() []entry {

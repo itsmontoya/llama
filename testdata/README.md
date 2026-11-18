@@ -77,3 +77,26 @@ cc -O2 -ffp-contract=off -I "$reference_dir" testdata/stories260k_reference.c -o
 
 LLAMA_STORIES260K_MODEL="$model_path" go test . -run '^TestStories260KLogits$' -count=1 -v
 ```
+
+## TinyStories 260K tokenizer
+
+`stories260k_tokenizer.json` records exact prompt IDs and decoded bytes for
+empty, plain-text, whitespace, and Unicode prompts. The driver uses the pinned
+llama2.c revision above to encode with BOS and decode the resulting IDs after
+BOS. It writes prompts and decoded bytes in hex to preserve whitespace and raw
+byte-fallback output before terminal filtering.
+
+From the repository root, keep the same temporary artifact directory and
+compiled driver from the checkpoint instructions above.
+
+```sh
+tokenizer_path="$artifact_dir/tok512.bin"
+curl -fL -o "$tokenizer_path" \
+  https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/tok512.bin
+printf '%s  %s\n' 037cb335abb25d1fa9e8ecae30ed2a3a8ace9302862ebcdc05d51a6bbb10c312 \
+  "$tokenizer_path" | shasum -a 256 -c
+
+"$reference_exe" tokenizer "$tokenizer_path" > testdata/stories260k_tokenizer.json
+LLAMA_STORIES260K_TOKENIZER="$tokenizer_path" \
+  go test ./internal/tokenizer -run '^TestStories260KTokenizerParity$' -count=1 -v
+```
