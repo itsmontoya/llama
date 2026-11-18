@@ -44,3 +44,36 @@ the exact reference implementation; the Meta link is an architecture reference.
 The script prints model/reference file hashes and is byte-for-byte deterministic
 in the recorded Python environment. Other Python versions may change metadata
 or math-library rounding; review and regenerate fixtures intentionally.
+
+## TinyStories 260K checkpoint logits
+
+`stories260k_logits.json` contains all 512 logits at each position of the
+prefixes `[1]` and `[1, 3, 42, 3]`. The test driver calls `build_transformer`
+and `forward` from [llama2.c at `350e04fe35433e6d2941dce5a1f53308f87058eb`](https://github.com/karpathy/llama2.c/tree/350e04fe35433e6d2941dce5a1f53308f87058eb),
+with positions starting from zero for each prefix. The Go comparison uses an
+absolute tolerance of `1e-4` plus a relative tolerance of `1e-4`.
+On darwin/arm64, the maximum observed absolute errors were `4.76837158e-06`
+for `[1]` and `7.62939453e-06` for `[1, 3, 42, 3]`.
+
+Run these commands from the repository root on a little-endian host. The
+checkpoint, upstream source, and compiled driver are stored in a temporary
+directory outside the repository.
+
+```sh
+artifact_dir=$(mktemp -d)
+model_path="$artifact_dir/stories260K.bin"
+reference_dir="$artifact_dir/llama2.c"
+reference_exe="$artifact_dir/stories260k_reference"
+
+curl -fL -o "$model_path" \
+  https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/stories260K.bin
+printf '%s  %s\n' b0a507e7ad0f626624f17112325e66691f9076d622e1d3274d103d00299f2696 \
+  "$model_path" | shasum -a 256 -c
+
+git clone https://github.com/karpathy/llama2.c.git "$reference_dir"
+git -C "$reference_dir" switch --detach 350e04fe35433e6d2941dce5a1f53308f87058eb
+cc -O2 -ffp-contract=off -I "$reference_dir" testdata/stories260k_reference.c -o "$reference_exe" -lm
+"$reference_exe" logits "$model_path" > testdata/stories260k_logits.json
+
+LLAMA_STORIES260K_MODEL="$model_path" go test . -run '^TestStories260KLogits$' -count=1 -v
+```
