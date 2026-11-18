@@ -80,7 +80,7 @@ func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*ten
 	if err := d.validatePrefix(tokens); err != nil {
 		return nil, err
 	}
-	x, err := d.forwardPrefix(tokens, trace)
+	x, err := d.forwardPrefix(tokens, trace, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*ten
 }
 
 // forwardPrefix evaluates all blocks for an already validated prefix.
-func (d *Decoder) forwardPrefix(tokens []int64, trace map[string]*tensor.Tensor) (*tensor.Tensor, error) {
+func (d *Decoder) forwardPrefix(tokens []int64, trace map[string]*tensor.Tensor, capture func(int, *tensor.Tensor, *tensor.Tensor) error) (*tensor.Tensor, error) {
 	x, err := gather(d.embedding, tokens, 0)
 	if err != nil {
 		return nil, fmt.Errorf("llama: embedding: %w", err)
@@ -102,10 +102,15 @@ func (d *Decoder) forwardPrefix(tokens []int64, trace map[string]*tensor.Tensor)
 	if err != nil {
 		return nil, err
 	}
-	attend := func(q, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
-		return attention(q, k, v, mask, d.config)
-	}
 	for index, block := range d.blocks {
+		attend := func(q, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
+			if capture != nil {
+				if err := capture(index, k, v); err != nil {
+					return nil, nil, err
+				}
+			}
+			return attention(q, k, v, mask, d.config)
+		}
 		if x, err = d.forwardBlock(x, block, cosine, sine, attend, trace, fmt.Sprintf("layer.%d.", index)); err != nil {
 			return nil, fmt.Errorf("llama: layer %d: %w", index, err)
 		}

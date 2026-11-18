@@ -29,8 +29,8 @@ func headProjection(input, weight *tensor.Tensor, heads, headWidth int64) (*tens
 	return reshape(projected, []int64{input.Shape()[0], heads, headWidth})
 }
 
-// attention deliberately materializes GQA heads and the full score matrix.
-// This copying reference path will be replaced by the later cached backend.
+// attention materializes GQA heads and the complete score matrix for the
+// full-prefix reference and session prefill.
 func attention(q, k, v, mask *tensor.Tensor, c Config) (*tensor.Tensor, *tensor.Tensor, error) {
 	tokens, headWidth := q.Shape()[0], c.Dim/c.Heads
 	indices := make([]int64, c.Heads)
@@ -61,7 +61,7 @@ func attention(q, k, v, mask *tensor.Tensor, c Config) (*tensor.Tensor, *tensor.
 	if err != nil {
 		return nil, nil, err
 	}
-	scale, err := scalar(float32(1 / math.Sqrt(float64(headWidth))))
+	scale, err := scalar(attentionScale(headWidth))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,4 +93,8 @@ func attention(q, k, v, mask *tensor.Tensor, c Config) (*tensor.Tensor, *tensor.
 		return nil, nil, err
 	}
 	return merged, probabilities, nil
+}
+
+func attentionScale(headWidth int64) float32 {
+	return float32(1 / math.Sqrt(float64(headWidth)))
 }
