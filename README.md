@@ -7,9 +7,43 @@ complete token prefix with batch size one and returns logits for every position.
 
 The decoder composes the tensor package's Gather, Gemm/MatMul, broadcast
 arithmetic, reductions, Sigmoid, reshape/transpose, and axis Softmax. It supports
-RMSNorm, ordinary adjacent-pair RoPE, causal MHA/GQA/MQA, residual blocks, and
-SwiGLU. Dimensions, FFN width, epsilon, RoPE base, context limit, and tied output
-weights are explicit configuration.
+RMSNorm, adjacent-pair RoPE with optional Llama 3 scaling, causal MHA/GQA/MQA,
+residual blocks, and SwiGLU. Dimensions, FFN width, epsilon, RoPE base, context
+limit, and tied output weights are explicit configuration.
+
+## Generate text with Llama 3.2 1B
+
+Use Go 1.26.1 or later and an authenticated Hugging Face account with access to
+`meta-llama/Llama-3.2-1B` at revision
+`4e20de362430cd3b72f300e6b0f18e50e7166e08`. Keep the six snapshot files outside
+the checkout. Set `model_dir` to that directory and `reference_python` to the
+local Python interpreter used for snapshot verification. [Pinned download and verification recipe](testdata/README.md#llama-32-1b-transformers-reference)
+
+From the repository root, check the snapshot against the manifest and generate
+an eight-token continuation:
+
+```sh
+"$reference_python" -B testdata/generate_llama32_reference.py \
+  --model-dir "$model_dir" --verify-only
+
+go run ./cmd/generate \
+  -hf-model-dir "$model_dir" -context 512 \
+  -prompt 'The capital of France is' -max-new-tokens 8
+```
+
+The full-prefix FP32 CPU path recomputes the prompt and its accumulated suffix
+for each prediction and serves as the numerical reference baseline. The command
+prints this continuation with one leading space and a trailing newline:
+
+```text
+ Paris. It is the most populous city
+```
+
+`-context` defaults to 512 in Hugging Face mode and must be positive and within
+the model's advertised limit. The encoded prompt, including BOS, shares this cap
+with the generated tokens. Generation stops before a selected stop token from
+the checkpoint metadata. A zero budget or full-context prompt prints an empty
+line. Use `-model` and `-tokenizer` together for legacy mode.
 
 ## Generate text with TinyStories 260K
 
@@ -124,9 +158,9 @@ materializes full attention-score matrices. Configuration checks integer/byte
 representability, not a total memory budget. Finite input weights still follow
 ordinary FP32 overflow/nonfinite arithmetic during execution.
 
-KV caching, chunked prefill with offsets, scaled/split-half RoPE, additional
-checkpoint and tokenizer formats, stochastic sampling, reduced precision, and
-practical model performance remain future work. Compatibility is verified for
-the pinned TinyStories 260K checkpoint and its tokenizer. The next backend
+KV caching, chunked prefill with offsets, sharded checkpoints, additional
+tokenizer formats, stochastic sampling, reduced precision, and practical model
+performance remain future work. Compatibility is verified for the pinned
+TinyStories 260K and Llama 3.2 1B checkpoints and tokenizers. The next backend
 milestone is bounded per-layer KV storage and cached/full-prefix parity.
 The detailed remaining library work is tracked in [NEEDS.md](NEEDS.md).
