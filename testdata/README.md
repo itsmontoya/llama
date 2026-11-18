@@ -220,3 +220,24 @@ is 4,943,257,600 bytes. Live staging holds one converted tensor at a time.
 Q and K row permutations use a second FP32 buffer, and file reads use 64 KiB of
 scratch. The largest staging tensor is the 1,050,673,152-byte embedding.
 Process RSS also depends on garbage collection and runtime overhead.
+
+### Llama 3 tokenizer parity
+
+After verifying the snapshot against the manifest, compare prompt IDs and
+decoded bytes with the pinned fast tokenizer, including the generation prompt
+and frozen suffix:
+
+```sh
+LLAMA_32_1B_MODEL_DIR="$model_dir" \
+  go test ./internal/tokenizer -run '^TestLlama32TokenizerParity$' -count=1 -v
+```
+
+The Go tokenizer uses the Split regex's letter and number ranges from the
+pinned Tokenizers 0.21.1 environment. Its Unicode classifications are frozen
+independently of Go's Unicode version. Check or regenerate the table with
+the same reference environment used above:
+
+```sh
+"$reference_python" -B testdata/generate_llama32_unicode.py |
+  cmp - internal/tokenizer/llama3_unicode.go
+```
