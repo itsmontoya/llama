@@ -28,6 +28,7 @@ func TestGenerateHFSynthetic(t *testing.T) {
 		stdout    string
 	}{
 		{"default context and EOS stop", nil, []int64{hfFixtureBOS}, []int64{'!'}, "!\n"},
+		{"uncached reference and EOS stop", []string{"-uncached"}, []int64{hfFixtureBOS}, []int64{'!'}, "!\n"},
 		{"first prediction is EOS", []string{"-prompt", "!"}, []int64{hfFixtureBOS, '!'}, nil, "\n"},
 		{"zero budget", []string{"-max-new-tokens", "0"}, []int64{hfFixtureBOS}, nil, "\n"},
 		{"exhausted context", []string{"-context", "1"}, []int64{hfFixtureBOS}, nil, "\n"},

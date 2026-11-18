@@ -41,22 +41,32 @@ func TestLlama32Generation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stdout, stderr bytes.Buffer
 	args := []string{"-hf-model-dir", dir, "-context", "512", "-prompt", want.Prompt, "-max-new-tokens", strconv.Itoa(want.MaxNewTokens)}
-	got, status := run(args, &stdout, &stderr)
-	if status != 0 || stderr.Len() != 0 {
-		t.Fatalf("exit = %d, stdout = %q, stderr = %q, want success", status, stdout.String(), stderr.String())
+	for _, mode := range []struct {
+		name  string
+		extra []string
+	}{
+		{name: "cached"},
+		{name: "uncached", extra: []string{"-uncached"}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			got, status := run(append(slices.Clone(args), mode.extra...), &stdout, &stderr)
+			if status != 0 || stderr.Len() != 0 {
+				t.Fatalf("exit = %d, stdout = %q, stderr = %q, want success", status, stdout.String(), stderr.String())
+			}
+			if !slices.Equal(got.promptIDs, want.PromptIDs) {
+				t.Errorf("prompt IDs = %v, want %v", got.promptIDs, want.PromptIDs)
+			}
+			if !slices.Equal(got.suffixIDs, want.SuffixIDs) {
+				t.Errorf("suffix IDs = %v, want %v", got.suffixIDs, want.SuffixIDs)
+			}
+			if wantStdout := string(decoded) + "\n"; stdout.String() != wantStdout {
+				t.Errorf("stdout = %q, want %q", stdout.String(), wantStdout)
+			}
+			t.Logf("prompt IDs: %v, suffix IDs: %v, stdout: %q", got.promptIDs, got.suffixIDs, stdout.String())
+		})
 	}
-	if !slices.Equal(got.promptIDs, want.PromptIDs) {
-		t.Errorf("prompt IDs = %v, want %v", got.promptIDs, want.PromptIDs)
-	}
-	if !slices.Equal(got.suffixIDs, want.SuffixIDs) {
-		t.Errorf("suffix IDs = %v, want %v", got.suffixIDs, want.SuffixIDs)
-	}
-	if wantStdout := string(decoded) + "\n"; stdout.String() != wantStdout {
-		t.Errorf("stdout = %q, want %q", stdout.String(), wantStdout)
-	}
-	t.Logf("prompt IDs: %v, suffix IDs: %v, stdout: %q", got.promptIDs, got.suffixIDs, stdout.String())
 }
 
 func verifyGenerationSnapshot(t *testing.T, dir string) {
