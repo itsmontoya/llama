@@ -1,0 +1,6 @@
+[
+  {"name": "empty", "prompt_hex": "", "prompt_ids": [1], "decoded_hex": ""},
+  {"name": "plain", "prompt_hex": "4f6e63652075706f6e20612074696d65", "prompt_ids": [1, 403, 407, 261, 378], "decoded_hex": "4f6e63652075706f6e20612074696d65"},
+  {"name": "whitespace", "prompt_hex": "2020090a20", "prompt_ids": [1, 410, 410, 410, 12, 13, 410], "decoded_hex": "2020090a20"},
+  {"name": "unicode", "prompt_hex": "436166c3a920f09fa699e2808a", "prompt_ids": [1, 410, 457, 412, 431, 485, 410, 243, 162, 169, 156, 511], "decoded_hex": "436166c3a920f09fa699e2808a"}
+]
