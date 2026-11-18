@@ -239,6 +239,17 @@ def reference_outputs(torch, model, tokenizer, policy):
     if len(sample_ids) != 32:
         raise ValueError("expected 32 distinct vocabulary sample IDs")
     sample_ids.update([policy["bos_token_id"], *policy["stop_token_ids"]])
+    added_special_ids = {token for token, added in tokenizer.added_tokens_decoder.items() if added.special}
+    tokenizer_cases = []
+    for name, prompt in TOKENIZER_CASES.items():
+        ids = encode(tokenizer, prompt)
+        sample_ids.update(added_special_ids.intersection(ids))
+        tokenizer_cases.append({
+            "name": name,
+            "input_text": prompt,
+            "prompt_ids": ids,
+            "decoded_bytes_hex": decoded_hex(tokenizer, ids),
+        })
 
     def forward(ids):
         tokens = torch.tensor([ids], dtype=torch.long, device="cpu")
@@ -278,15 +289,6 @@ def reference_outputs(torch, model, tokenizer, policy):
     positions = [0, 1, 7, 31]
     cos, sin = rotary(torch.empty(0, dtype=torch.float32, device="cpu"), torch.tensor([positions], device="cpu"))
     width = rotary.inv_freq.numel()
-    tokenizer_cases = []
-    for name, prompt in TOKENIZER_CASES.items():
-        ids = encode(tokenizer, prompt)
-        tokenizer_cases.append({
-            "name": name,
-            "input_text": prompt,
-            "prompt_ids": ids,
-            "decoded_bytes_hex": decoded_hex(tokenizer, ids),
-        })
     return {
         "tokenizer_cases": tokenizer_cases,
         "logit_cases": logit_cases,
