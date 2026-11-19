@@ -26,14 +26,23 @@ an eight-token continuation:
 "$reference_python" -B testdata/generate_llama32_reference.py \
   --model-dir "$model_dir" --verify-only
 
-go run ./cmd/generate \
+bin_dir=$(mktemp -d)
+go build -o "$bin_dir/generate" ./cmd/generate
+"$bin_dir/generate" \
   -hf-model-dir "$model_dir" -context 512 \
   -prompt 'The capital of France is' -max-new-tokens 8
 ```
 
-The full-prefix FP32 CPU path recomputes the prompt and its accumulated suffix
-for each prediction and serves as the numerical reference baseline. The command
-prints this continuation with one leading space and a trailing newline:
+Hugging Face mode prefills the prompt once and decodes with an FP32 KV cache.
+For the full-prefix numerical baseline, pass `-uncached` to the same command:
+
+```sh
+"$bin_dir/generate" -uncached \
+  -hf-model-dir "$model_dir" -context 512 \
+  -prompt 'The capital of France is' -max-new-tokens 8
+```
+
+Both modes print this continuation with one leading space and a trailing newline:
 
 ```text
  Paris. It is the most populous city
@@ -44,6 +53,80 @@ the model's advertised limit. The encoded prompt, including BOS, shares this cap
 with the generated tokens. Generation stops before a selected stop token from
 the checkpoint metadata. A zero budget or full-context prompt prints an empty
 line. Use `-model` and `-tokenizer` together for legacy mode.
+
+For the cgo-disabled CPU build, run the same cached command with this binary:
+
+```sh
+CGO_ENABLED=0 go build -tags=purego -o "$bin_dir/generate-purego" ./cmd/generate
+"$bin_dir/generate-purego" \
+  -hf-model-dir "$model_dir" -context 512 \
+  -prompt 'The capital of France is' -max-new-tokens 8
+```
+
+### Ask questions in the terminal
+
+Run the interactive example with the same verified model directory:
+
+```sh
+go run ./cmd/example -hf-model-dir "$model_dir"
+```
+
+Type a question such as `What is the capital of France?` and press Enter.
+Press Ctrl-D to exit. The example loads the model once and treats each question
+as a fresh completion. It also accepts one question per line from a pipe.
+Use `-max-new-tokens` to change the answer budget, which defaults to 16.
+
+### CPU baseline
+
+The pinned prompt encodes to six tokens, including BOS. The eight-token output
+budget uses one prefill and seven decode calls. The runtime cap is 512, and the
+cache allocates 13 positions because the last selected token requires no decode.
+The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estimate
+is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
+scratch, tokenizer, temporary tensors, and Go runtime overhead.
+
+The measurement uses `BenchmarkLlama32CachedGeneration` on Go 1.27.2,
+macOS 26.5.2 (25F84) darwin/arm64, Apple M3 (4 performance and 4 efficiency
+cores), 24 GB RAM, `CGO_ENABLED=1`, default build tags, and `GOMAXPROCS=8`.
+It runs one inference trial per fresh process, with three repeats and zero
+inference warm-ups. Each trial verifies the snapshot first, so the load
+measurements can benefit from the filesystem cache.
+
+```sh
+CGO_ENABLED=1 go test -c -o "$bin_dir/llama.test" .
+for trial in 1 2 3; do
+  LLAMA_32_1B_MODEL_DIR="$model_dir" GOMAXPROCS=8 \
+    /usr/bin/time -l "$bin_dir/llama.test" -test.run '^$' \
+    -test.bench '^BenchmarkLlama32CachedGeneration$' -test.benchtime 1x \
+    -test.benchmem -test.timeout 15m -test.v
+done
+```
+
+`model-load-s` measures checkpoint loading. `tokenizer-setup-s` covers tokenizer
+loading and prompt encoding. Cache allocation is reported separately. Prefill
+returns the final prompt logit row, and first-token time adds greedy selection.
+Decode throughput counts only the seven predictions after prefill, including
+greedy selection. The benchmark excludes CLI flag parsing, and its stage
+metrics exclude snapshot hashing and suffix text decoding. macOS
+`/usr/bin/time -l` reports maximum resident set size for the complete process.
+
+| Trial | Model load (s) | Tokenizer setup (s) | Prefill (s) | First token (s) | Decode (s) | Decode tokens/s | Peak RSS (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.859 | 0.190 | 19.17 | 19.17 | 28.89 | 0.2423 | 5.806 |
+| 2 | 1.868 | 0.173 | 17.92 | 17.92 | 29.02 | 0.2412 | 6.373 |
+| 3 | 1.898 | 0.173 | 19.06 | 19.06 | 29.20 | 0.2398 | 6.301 |
+
+The built native and pure-Go commands matched the frozen stdout in 50.26 s
+and 51.63 s end to end. The separate CLI integration test matched all prompt
+IDs, generated IDs, and stdout in both cached and uncached modes. The cached
+test case took 52.24 s and the uncached case took 310.13 s, including loading
+and tokenizer setup.
+
+Cache allocation took 9–21 microseconds per trial. First-token times round to
+the same values as prefill at the displayed precision. Prefill and decode took
+about 47–48 seconds combined and allocated about 199 MB per trial after setup.
+Profile the CPU projection kernels and temporary tensor allocations separately
+in follow-up work. [CPU performance backlog](NEEDS.md#llnn-08-cpu-performance-that-represents-generation)
 
 ## Generate text with TinyStories 260K
 
@@ -137,6 +220,11 @@ A failed step leaves that position intact so it can be retried. `Reset()`
 discards the history and allows a new prompt. Separate sessions can share the
 same decoder concurrently. Callers synchronize use of each session.
 
+`decoder.GenerateGreedyCached(prompt, maxNewTokens, stopIDs...)` handles prefill,
+incremental decode, and greedy selection for a caller-owned continuation.
+`decoder.GenerateGreedy` uses full-prefix execution with the same token budget,
+stop IDs, and lowest-ID tie break.
+
 ## Numerical checks
 
 ```sh
@@ -159,7 +247,7 @@ copying, retained outputs, concurrent calls, invalid models/tokens, and context
 limits. Go tests use checked-in JSON and need neither Python nor network access
 once Go dependencies are cached. See [fixture provenance](testdata/README.md).
 
-## Scope and next milestone
+## Scope and follow-up work
 
 Full-prefix and prefill paths copy head reshapes, expand KV heads for GQA,
 and materialize full attention-score matrices. Single-token decode reads its
@@ -169,5 +257,5 @@ Configuration checks that tensor and cache sizes fit their integer indices.
 Chunked prefill with offsets, sharded checkpoints, additional tokenizer formats,
 stochastic sampling, and reduced precision remain future work. Compatibility is
 verified for the pinned TinyStories 260K and Llama 3.2 1B checkpoints and
-tokenizers. The next milestone is cached CLI generation and CPU measurement.
+tokenizers.
 The detailed remaining library work is tracked in [NEEDS.md](NEEDS.md).

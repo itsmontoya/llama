@@ -32,6 +32,7 @@ func TestGenerateArgumentErrors(t *testing.T) {
 		{"HF with tokenizer", []string{"-hf-model-dir", "snapshot", "-tokenizer="}, "cannot be combined"},
 		{"empty HF path", []string{"-hf-model-dir="}, "requires a nonempty directory path"},
 		{"context with legacy", []string{"-model", "model.bin", "-tokenizer", "tokens.bin", "-context", "512"}, "-context requires -hf-model-dir"},
+		{"uncached with legacy", []string{"-model", "model.bin", "-tokenizer", "tokens.bin", "-uncached"}, "-uncached requires -hf-model-dir"},
 		{"invalid context", []string{"-hf-model-dir", "snapshot", "-context", "three"}, "invalid value"},
 		{"zero context", []string{"-hf-model-dir", "snapshot", "-context", "0"}, "-context must be positive"},
 		{"negative context", []string{"-hf-model-dir", "snapshot", "-context", "-1"}, "-context must be positive"},

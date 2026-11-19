@@ -33,22 +33,41 @@ func newGreedyTestDecoder(t *testing.T, lastOutput [2]float32) *Decoder {
 	return decoder
 }
 
-func TestGenerateGreedyDeterministicAndOwned(t *testing.T) {
+type greedyMethod func(*Decoder, []int64, int, ...int64) ([]int64, error)
+
+func TestGenerateGreedy(t *testing.T) {
+	for _, mode := range []struct {
+		name     string
+		generate greedyMethod
+	}{
+		{"full prefix", (*Decoder).GenerateGreedy},
+		{"cached", (*Decoder).GenerateGreedyCached},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Run("deterministic and owned", func(t *testing.T) { testGreedyDeterministicAndOwned(t, mode.generate) })
+			t.Run("limits and stops", func(t *testing.T) { testGreedyLimitsAndStops(t, mode.generate) })
+			t.Run("invalid inputs", func(t *testing.T) { testGreedyRejectsInvalidInputs(t, mode.generate) })
+			t.Run("nonfinite logits", func(t *testing.T) { testGreedyRejectsNonfiniteLastRow(t, mode.generate) })
+		})
+	}
+}
+
+func testGreedyDeterministicAndOwned(t *testing.T, generate greedyMethod) {
 	// For prompt [0], tokens 1 and 4 have equal highest logits.
 	decoder := newGreedyTestDecoder(t, [2]float32{1, 0})
 	backing := []int64{0, 9, 9, 9, 9}
 	prompt := backing[:1]
 	want := []int64{1, 2, 3, 0}
 
-	first, err := decoder.GenerateGreedy(prompt, 4)
+	first, err := generate(decoder, prompt, 4)
 	if err != nil || !slices.Equal(first, want) {
 		t.Fatalf("first continuation = %v, error = %v, want %v", first, err, want)
 	}
-	again, err := decoder.GenerateGreedy(prompt, 4)
+	again, err := generate(decoder, prompt, 4)
 	if err != nil || !slices.Equal(again, want) {
 		t.Fatalf("repeated continuation = %v, error = %v, want %v", again, err, want)
 	}
-	other, err := decoder.GenerateGreedy([]int64{1}, 4)
+	other, err := generate(decoder, []int64{1}, 4)
 	if err != nil || !slices.Equal(other, []int64{2, 3, 0, 1}) {
 		t.Fatalf("different prompt continuation = %v, error = %v", other, err)
 	}
@@ -61,7 +80,7 @@ func TestGenerateGreedyDeterministicAndOwned(t *testing.T) {
 	}
 }
 
-func TestGenerateGreedyLimitsAndStops(t *testing.T) {
+func testGreedyLimitsAndStops(t *testing.T, generate greedyMethod) {
 	decoder := newGreedyTestDecoder(t, [2]float32{1, 0})
 	for _, test := range []struct {
 		name   string
@@ -78,7 +97,7 @@ func TestGenerateGreedyLimitsAndStops(t *testing.T) {
 		{name: "later token is a stop", prompt: []int64{0}, budget: 4, stops: []int64{0, 3}, want: []int64{1, 2}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := decoder.GenerateGreedy(test.prompt, test.budget, test.stops...)
+			got, err := generate(decoder, test.prompt, test.budget, test.stops...)
 			if err != nil || !slices.Equal(got, test.want) {
 				t.Fatalf("continuation = %v, error = %v, want %v", got, err, test.want)
 			}
@@ -86,7 +105,7 @@ func TestGenerateGreedyLimitsAndStops(t *testing.T) {
 	}
 }
 
-func TestGenerateGreedyRejectsInvalidInputs(t *testing.T) {
+func testGreedyRejectsInvalidInputs(t *testing.T, generate greedyMethod) {
 	decoder := newGreedyTestDecoder(t, [2]float32{1, 0})
 	for _, test := range []struct {
 		name    string
@@ -107,7 +126,7 @@ func TestGenerateGreedyRejectsInvalidInputs(t *testing.T) {
 		{name: "large stop ID", decoder: decoder, prompt: make([]int64, 5), budget: 1, stops: []int64{0, 5}, wantErr: "stop token"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := test.decoder.GenerateGreedy(test.prompt, test.budget, test.stops...)
+			got, err := generate(test.decoder, test.prompt, test.budget, test.stops...)
 			if got != nil || err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("continuation = %v, error = %v, want nil and error containing %q", got, err, test.wantErr)
 			}
@@ -115,20 +134,20 @@ func TestGenerateGreedyRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
-func TestGenerateGreedyRejectsNonfiniteLastRow(t *testing.T) {
+func testGreedyRejectsNonfiniteLastRow(t *testing.T, generate greedyMethod) {
 	// A finite output weight overflows to negative infinity for token 1,
 	// even though the winning logit remains finite.
 	decoder := newGreedyTestDecoder(t, [2]float32{0, -math.MaxFloat32})
-	first, err := decoder.GenerateGreedy([]int64{0}, 1)
+	first, err := generate(decoder, []int64{0}, 1)
 	if err != nil || !slices.Equal(first, []int64{1}) {
 		t.Fatalf("single-step continuation = %v, error = %v", first, err)
 	}
-	got, err := decoder.GenerateGreedy([]int64{0}, 2)
+	got, err := generate(decoder, []int64{0}, 2)
 	if got != nil || err == nil || !strings.Contains(err.Error(), "nonfinite logit") {
 		t.Fatalf("two-step continuation = %v, error = %v, want nil and nonfinite logit error", got, err)
 	}
 	// The first row still overflows, but only the final row is needed.
-	got, err = decoder.GenerateGreedy([]int64{1, 0}, 1)
+	got, err = generate(decoder, []int64{1, 0}, 1)
 	if err != nil || !slices.Equal(got, first) {
 		t.Fatalf("continuation with nonfinite earlier row = %v, error = %v", got, err)
 	}

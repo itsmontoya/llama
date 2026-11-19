@@ -29,6 +29,7 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	tokenizerPath := flags.String("tokenizer", "", "matching legacy tokenizer vocabulary path")
 	hfModelDir := flags.String("hf-model-dir", "", "Hugging Face model and tokenizer directory")
 	context := flags.Int64("context", 512, "Hugging Face runtime context cap in tokens")
+	uncached := flags.Bool("uncached", false, "recompute full prefixes in Hugging Face mode")
 	prompt := flags.String("prompt", "", "text prompt")
 	maxNewTokens := flags.Int("max-new-tokens", 16, "maximum new tokens")
 	if err := flags.Parse(args); err != nil {
@@ -50,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 		usageError = "-hf-model-dir requires a nonempty directory path"
 	case !useHF && provided["context"]:
 		usageError = "-context requires -hf-model-dir"
+	case !useHF && provided["uncached"]:
+		usageError = "-uncached requires -hf-model-dir"
 	case !useHF && (*modelPath == "" || *tokenizerPath == ""):
 		usageError = "-model and -tokenizer are required for legacy mode"
 	case *context <= 0:
@@ -65,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	var result generationResult
 	var err error
 	if useHF {
-		result, err = generateHF(*hfModelDir, *context, *prompt, *maxNewTokens)
+		result, err = generateHF(*hfModelDir, *context, *prompt, *maxNewTokens, *uncached)
 	} else {
 		result, err = generateLegacy(*modelPath, *tokenizerPath, *prompt, *maxNewTokens)
 	}
@@ -100,7 +103,7 @@ func generateLegacy(modelPath, tokenizerPath, prompt string, maxNewTokens int) (
 	return generationResult{promptIDs: promptIDs, suffixIDs: suffixIDs, text: text}, err
 }
 
-func generateHF(dir string, context int64, prompt string, maxNewTokens int) (generationResult, error) {
+func generateHF(dir string, context int64, prompt string, maxNewTokens int, uncached bool) (generationResult, error) {
 	decoder, generation, err := llama.LoadHFModel(dir, context)
 	if err != nil {
 		return generationResult{}, err
@@ -113,7 +116,11 @@ func generateHF(dir string, context int64, prompt string, maxNewTokens int) (gen
 	if err != nil {
 		return generationResult{}, err
 	}
-	suffixIDs, err := decoder.GenerateGreedy(promptIDs, maxNewTokens, generation.StopIDs...)
+	generate := decoder.GenerateGreedyCached
+	if uncached {
+		generate = decoder.GenerateGreedy
+	}
+	suffixIDs, err := generate(promptIDs, maxNewTokens, generation.StopIDs...)
 	if err != nil {
 		return generationResult{}, err
 	}

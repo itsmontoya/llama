@@ -151,7 +151,7 @@ func compareLlama32Row(t *testing.T, label string, prefix []int64, row []float32
 	return largest, fraction
 }
 
-func verifyLlama32Snapshot(t *testing.T, dir string) {
+func verifyLlama32Snapshot(t testing.TB, dir string) {
 	t.Helper()
 	var manifest struct {
 		Revision string `json:"revision"`
