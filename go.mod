@@ -1,6 +1,6 @@
 module github.com/itsmontoya/llama
 
-go 1.26.1
+go 1.27.3
 
 require github.com/itsmontoya/neuralnetwork v0.10.11
 
