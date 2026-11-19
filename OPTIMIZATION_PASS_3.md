@@ -5,10 +5,11 @@ Pass 3 moved cached Llama 3.2 1B generation from **4.216 to 3.060 s/op
 The change is in the shared CPU product kernel in
 `neuralnetwork`, commit `e378860ebdb6efbe835c194d80fab012c60ed256`.
 
-The dependency commits are retained on the local `neuralnetwork`
-`optimization-pass-3` branch. Llama's paired builds used the exact
-candidate pseudo-version through an alternate modfile. The committed
-Llama pin is `v0.10.12` pending upstream publication.
+Llama pins the published module version
+`v0.10.13-0.20261119195252-e378860ebdb6`. Go verified the public module
+through its checksum database. The module and `go.mod` checksums match
+the archive used for the paired measurements.
+[Published upstream branch](https://github.com/itsmontoya/neuralnetwork/tree/optimization-pass-3)
 
 ## Selected optimization
 
@@ -94,7 +95,8 @@ allocation totals.
 ## Correctness
 
 Both dependency versions passed the full default and `purego` Llama
-test suites on Go 1.27.3. The pinned Transformers comparison preserved
+test suites on Go 1.27.3, including a rerun with the published version
+in Llama's `go.mod`. The pinned Transformers comparison preserved
 every checked greedy winner. The largest absolute logit error was
 `4.95910645e-05`. All 128,256 logits matched between cached and full-prefix
 evaluation at each of the five checked positions. All numerical checks
@@ -153,15 +155,8 @@ git show 20a45d9:go.sum > "$bench_dir/before.sum"
 cp "$bench_dir/before.mod" "$bench_dir/after.mod"
 cp "$bench_dir/before.sum" "$bench_dir/after.sum"
 
-neuralnetwork_repo=$(cd ../neuralnetwork && pwd -P)
-env GONOPROXY=github.com/itsmontoya/neuralnetwork \
-  GONOSUMDB=github.com/itsmontoya/neuralnetwork \
-  GIT_CONFIG_COUNT=2 \
-  "GIT_CONFIG_KEY_0=url.file://$neuralnetwork_repo.insteadOf" \
-  GIT_CONFIG_VALUE_0=https://github.com/itsmontoya/neuralnetwork \
-  GIT_CONFIG_KEY_1=protocol.file.allow GIT_CONFIG_VALUE_1=always \
-  go get -modfile="$bench_dir/after.mod" \
-  github.com/itsmontoya/neuralnetwork@e378860ebdb6efbe835c194d80fab012c60ed256
+go get -modfile="$bench_dir/after.mod" \
+  github.com/itsmontoya/neuralnetwork@v0.10.13-0.20261119195252-e378860ebdb6
 go mod tidy -modfile="$bench_dir/after.mod"
 
 for build in before after; do

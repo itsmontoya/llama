@@ -1,7 +1,7 @@
 # llama
 
 A tiny FP32 Llama-style decoder built on
-[`neuralnetwork v0.10.12`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.12).
+[neuralnetwork commit e378860](https://github.com/itsmontoya/neuralnetwork/tree/e378860ebdb6efbe835c194d80fab012c60ed256).
 This is the numerical baseline for a Go inference runtime. It evaluates a
 complete token prefix with batch size one and returns logits for every position.
 
@@ -87,7 +87,7 @@ scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
 #### Optimization Pass 3 (Go 1.27.3)
 
-The `neuralnetwork` candidate tiles four output columns for three-input-row
+The `neuralnetwork` CPU kernel tiles four output columns for three-input-row
 FP32 projections. On the pinned workload, median time to first token fell
 from 1.881 to 0.742 s, and cached generation fell from 4.216 to 3.060 s/op.
 [Paired measurements, validation, and Pass 4 candidates](OPTIMIZATION_PASS_3.md)
