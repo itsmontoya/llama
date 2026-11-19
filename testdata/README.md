@@ -119,3 +119,64 @@ before regenerating the fixture.
 LLAMA_STORIES260K_MODEL="$model_path" LLAMA_STORIES260K_TOKENIZER="$tokenizer_path" \
   go test ./cmd/generate -run '^TestStories260KGeneration$' -count=1 -v
 ```
+
+## Llama 3.2 1B Transformers reference
+
+The generator uses the Meta base checkpoint `meta-llama/Llama-3.2-1B` at
+revision `4e20de362430cd3b72f300e6b0f18e50e7166e08`. The six file sizes, Git
+blob IDs of the JSON files, and SHA-256 of `model.safetensors` come from the
+[official revision inventory](https://huggingface.co/api/models/meta-llama/Llama-3.2-1B/revision/4e20de362430cd3b72f300e6b0f18e50e7166e08?blobs=true).
+
+Use CPython 3.12.12 on macOS arm64 and install the hashed dependency lock.
+Run from the repository root with `uv` available. The checkpoint and
+environment live outside the checkout. If the snapshot is already local,
+set `model_dir` to its directory and omit `--download` and the login command.
+
+```sh
+reference_dir=$(mktemp -d)
+model_dir="$reference_dir/model"
+uv python install 3.12.12
+uv venv --python 3.12.12 "$reference_dir/env"
+reference_python="$reference_dir/env/bin/python"
+uv pip sync --python "$reference_python" --require-hashes --only-binary :all: \
+  testdata/llama32-reference-requirements.lock
+
+# Use a local Hugging Face account with approved access to the model.
+"$reference_dir/env/bin/huggingface-cli" login
+"$reference_python" testdata/generate_llama32_reference.py \
+  --model-dir "$model_dir" --download --verify-only
+
+for run in first second; do
+  "$reference_python" testdata/generate_llama32_reference.py \
+    --model-dir "$model_dir" --output-dir "$reference_dir/$run"
+done
+for name in llama32_manifest.json llama32_reference.json; do
+  cmp "$reference_dir/first/$name" "$reference_dir/second/$name" || exit 1
+done
+# Freeze both fixtures after reviewing the generated records.
+cp "$reference_dir/first/llama32_manifest.json" "$reference_dir/first/llama32_reference.json" testdata/
+```
+
+`llama32_manifest.json` records SHA-256 for each verified file, the raw and
+resolved configuration, the safetensors header inventory, and the effective
+fast tokenizer components. `llama32_reference.json` records the exact host
+and environment, IDs and decoded bytes for tokenizer cases, the scaled
+rotary frequencies and coefficients at fixed positions, and logits from
+the prompt and the greedy trajectory. Each observed row records the winning
+ID, the top eight logits with the top-two margin, and logits at 32 evenly
+spaced vocabulary IDs plus the special IDs and top candidates. Generated
+step prefixes are stored verbatim so a failed position can be replayed.
+
+The pinned file has 146 BF16 tensors with 1,235,814,400 parameters. The
+classifier shares the embedding weights. The frozen reference uses one CPU
+thread for each of intra-op and inter-op work on an Apple M3 running macOS
+26.5.2. Its eight-token continuation of `The capital of France is` is
+`Paris. It is the most populous city`, preceded by one space.
+
+The oracle uses CPU FP32 with eager attention and recomputes the full
+prefix for each prediction. It selects the highest raw logit, breaks ties
+by lowest token ID, stops before a selected EOS, and decodes only the suffix.
+The fixture uses BOS insertion, no truncation or padding, and decoding with
+special tokens skipped and whitespace cleanup disabled. For opt-in tests,
+run `--verify-only` against the checked-in manifest before setting
+`LLAMA_32_1B_MODEL_DIR` to the verified directory.
