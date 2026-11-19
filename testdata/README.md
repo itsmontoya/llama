@@ -221,6 +221,21 @@ Q and K row permutations use a second FP32 buffer, and file reads use 64 KiB of
 scratch. The largest staging tensor is the 1,050,673,152-byte embedding.
 Process RSS also depends on garbage collection and runtime overhead.
 
+### Cached decode parity
+
+Verify the six snapshot files as above, then run the cache check in one test
+process:
+
+```sh
+LLAMA_32_1B_MODEL_DIR="$model_dir" go test . -run '^TestLlama32CachedParity$' -count=1 -v
+```
+
+The test prefills the frozen six-token prompt and replays its first four
+generated IDs. At each step it compares all 128,256 logits with the last row
+from a fresh full-prefix forward using `atol = rtol = 1e-4`. Both paths must
+select the frozen winning ID. The test checks snapshot hashes and reports
+maximum absolute errors and tolerance fractions with positions and token IDs.
+
 ### Llama 3 tokenizer parity
 
 After verifying the snapshot against the manifest, compare prompt IDs and

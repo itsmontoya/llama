@@ -27,8 +27,8 @@ func NewDecoder(config Config, weights Weights) (*Decoder, error) {
 	return decoder, nil
 }
 
-// Decoder evaluates full token prefixes at batch size one. It has no KV cache
-// or mutable session state. Its zero value is invalid.
+// Decoder owns immutable model weights for batch-one inference. Its zero value
+// is invalid.
 type Decoder struct {
 	config                  Config
 	embedding, norm, output *tensor.Tensor
@@ -80,6 +80,15 @@ func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*ten
 	if err := d.validatePrefix(tokens); err != nil {
 		return nil, err
 	}
+	x, err := d.forwardPrefix(tokens, trace, nil)
+	if err != nil {
+		return nil, err
+	}
+	return d.projectLogits(x, trace)
+}
+
+// forwardPrefix evaluates all blocks for an already validated prefix.
+func (d *Decoder) forwardPrefix(tokens []int64, trace map[string]*tensor.Tensor, capture func(int, *tensor.Tensor, *tensor.Tensor) error) (*tensor.Tensor, error) {
 	x, err := gather(d.embedding, tokens, 0)
 	if err != nil {
 		return nil, fmt.Errorf("llama: embedding: %w", err)
@@ -94,10 +103,22 @@ func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*ten
 		return nil, err
 	}
 	for index, block := range d.blocks {
-		if x, err = d.forwardBlock(x, block, cosine, sine, mask, trace, fmt.Sprintf("layer.%d.", index)); err != nil {
+		attend := func(q, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
+			if capture != nil {
+				if err := capture(index, k, v); err != nil {
+					return nil, nil, err
+				}
+			}
+			return attention(q, k, v, mask, d.config)
+		}
+		if x, err = d.forwardBlock(x, block, cosine, sine, attend, trace, fmt.Sprintf("layer.%d.", index)); err != nil {
 			return nil, fmt.Errorf("llama: layer %d: %w", index, err)
 		}
 	}
+	return x, nil
+}
+
+func (d *Decoder) projectLogits(x *tensor.Tensor, trace map[string]*tensor.Tensor) (*tensor.Tensor, error) {
 	hidden, err := rmsNorm(x, d.norm, d.config.NormEpsilon)
 	if err != nil {
 		return nil, fmt.Errorf("llama: final norm: %w", err)
@@ -111,7 +132,9 @@ func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*ten
 	return logits, nil
 }
 
-func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sine, mask *tensor.Tensor, trace map[string]*tensor.Tensor, prefix string) (*tensor.Tensor, error) {
+type blockAttention func(q, k, v *tensor.Tensor) (attended, probabilities *tensor.Tensor, err error)
+
+func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sine *tensor.Tensor, attend blockAttention, trace map[string]*tensor.Tensor, prefix string) (*tensor.Tensor, error) {
 	n, err := rmsNorm(x, block.attentionNorm, d.config.NormEpsilon)
 	if err != nil {
 		return nil, err
@@ -143,7 +166,7 @@ func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sin
 	}
 	record(trace, prefix+"rope_q", rotatedQ)
 	record(trace, prefix+"rope_k", rotatedK)
-	attended, probabilities, err := attention(rotatedQ, rotatedK, v, mask, d.config)
+	attended, probabilities, err := attend(rotatedQ, rotatedK, v)
 	if err != nil {
 		return nil, err
 	}

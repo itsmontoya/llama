@@ -129,6 +129,14 @@ Q/K/V, rotated Q/K, attention probabilities and merged output, residuals, gate/u
 projections, SwiGLU output, and block output; final hidden state; and logits.
 `trace["logits"]` is the returned logits tensor. Errors return no partial result.
 
+`decoder.NewSession(capacity)` allocates bounded FP32 KV storage for a prompt and
+its continuation. Call `Prefill(tokens)` once to get the final prompt logit row,
+then `Decode(token)` for each subsequent token. Both methods return caller-owned
+rows. `Position()` counts committed tokens and gives the next absolute position.
+A failed step leaves that position intact so it can be retried. `Reset()`
+discards the history and allows a new prompt. Separate sessions can share the
+same decoder concurrently. Callers synchronize use of each session.
+
 ## Numerical checks
 
 ```sh
@@ -153,14 +161,13 @@ once Go dependencies are cached. See [fixture provenance](testdata/README.md).
 
 ## Scope and next milestone
 
-This path deliberately copies head reshapes, expands KV heads for GQA, and
-materializes full attention-score matrices. Configuration checks integer/byte
-representability, not a total memory budget. Finite input weights still follow
-ordinary FP32 overflow/nonfinite arithmetic during execution.
+Full-prefix and prefill paths copy head reshapes, expand KV heads for GQA,
+and materialize full attention-score matrices. Single-token decode reads its
+session's populated cache directly and uses one score row of scratch storage.
+Configuration checks that tensor and cache sizes fit their integer indices.
 
-KV caching, chunked prefill with offsets, sharded checkpoints, additional
-tokenizer formats, stochastic sampling, reduced precision, and practical model
-performance remain future work. Compatibility is verified for the pinned
-TinyStories 260K and Llama 3.2 1B checkpoints and tokenizers. The next backend
-milestone is bounded per-layer KV storage and cached/full-prefix parity.
+Chunked prefill with offsets, sharded checkpoints, additional tokenizer formats,
+stochastic sampling, and reduced precision remain future work. Compatibility is
+verified for the pinned TinyStories 260K and Llama 3.2 1B checkpoints and
+tokenizers. The next milestone is cached CLI generation and CPU measurement.
 The detailed remaining library work is tracked in [NEEDS.md](NEEDS.md).
