@@ -18,31 +18,17 @@ func NewDecoder(config Config, weights Weights) (*Decoder, error) {
 	if config.TieEmbeddings && len(weights.Output) != 0 {
 		return nil, fmt.Errorf("llama: tied embeddings require empty output weights")
 	}
-	embedding, err := weightTensor("token_embedding", []int64{config.VocabSize, config.Dim}, weights.TokenEmbedding)
-	if err != nil {
+	decoder := &Decoder{config: config, blocks: make([]blockWeights, len(weights.Layers))}
+	if err := decoder.loadWeights(weights, func(_ int, weight decoderWeight) (string, []float32, error) {
+		return weight.name, weight.values, nil
+	}); err != nil {
 		return nil, err
 	}
-	norm, err := weightTensor("final_norm", []int64{config.Dim}, weights.FinalNorm)
-	if err != nil {
-		return nil, err
-	}
-	output := embedding
-	if !config.TieEmbeddings {
-		if output, err = weightTensor("output", []int64{config.VocabSize, config.Dim}, weights.Output); err != nil {
-			return nil, err
-		}
-	}
-	blocks := make([]blockWeights, len(weights.Layers))
-	for index, layerWeights := range weights.Layers {
-		if blocks[index], err = loadBlock(config, layerWeights); err != nil {
-			return nil, fmt.Errorf("llama: layer %d: %w", index, err)
-		}
-	}
-	return &Decoder{config: config, embedding: embedding, norm: norm, output: output, blocks: blocks}, nil
+	return decoder, nil
 }
 
 // Decoder evaluates full token prefixes at batch size one. It has no KV cache
-// or mutable session state. Its zero value is invalid; use NewDecoder.
+// or mutable session state. Its zero value is invalid.
 type Decoder struct {
 	config                  Config
 	embedding, norm, output *tensor.Tensor

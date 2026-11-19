@@ -49,30 +49,74 @@ func weightTensor(name string, shape []int64, values []float32) (*tensor.Tensor,
 	return out, nil
 }
 
-func loadBlock(c Config, w LayerWeights) (blockWeights, error) {
-	var block blockWeights
-	kvWidth := c.KVHeads * (c.Dim / c.Heads)
-	for _, item := range []struct {
-		name   string
-		shape  []int64
-		values []float32
-		target **tensor.Tensor
-	}{
-		{"attention_norm", []int64{c.Dim}, w.AttentionNorm, &block.attentionNorm},
-		{"wq", []int64{c.Dim, c.Dim}, w.WQ, &block.wq},
-		{"wk", []int64{kvWidth, c.Dim}, w.WK, &block.wk},
-		{"wv", []int64{kvWidth, c.Dim}, w.WV, &block.wv},
-		{"wo", []int64{c.Dim, c.Dim}, w.WO, &block.wo},
-		{"ffn_norm", []int64{c.Dim}, w.FFNNorm, &block.ffnNorm},
-		{"w_gate", []int64{c.FFNDim, c.Dim}, w.WGate, &block.gate},
-		{"w_up", []int64{c.FFNDim, c.Dim}, w.WUp, &block.up},
-		{"w_down", []int64{c.Dim, c.FFNDim}, w.WDown, &block.down},
+type decoderWeight struct {
+	name   string
+	shape  []int64
+	values []float32
+	target **tensor.Tensor
+}
+
+// visitWeights defines the shape and destination of each private tensor.
+// Model-wide weights use layer -1. File loaders supply their values later.
+func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWeight) error) error {
+	c := d.config
+	vocabShape := []int64{c.VocabSize, c.Dim}
+	normShape := []int64{c.Dim}
+	for _, weight := range []decoderWeight{
+		{"token_embedding", vocabShape, w.TokenEmbedding, &d.embedding},
+		{"final_norm", normShape, w.FinalNorm, &d.norm},
 	} {
-		value, err := weightTensor(item.name, item.shape, item.values)
-		if err != nil {
-			return blockWeights{}, err
+		if err := visit(-1, weight); err != nil {
+			return err
 		}
-		*item.target = value
 	}
-	return block, nil
+	if !c.TieEmbeddings {
+		if err := visit(-1, decoderWeight{"output", vocabShape, w.Output, &d.output}); err != nil {
+			return err
+		}
+	}
+	headWidth := c.Dim / c.Heads
+	qShape := []int64{c.Heads * headWidth, c.Dim}
+	kvShape := []int64{c.KVHeads * headWidth, c.Dim}
+	upShape, downShape := []int64{c.FFNDim, c.Dim}, []int64{c.Dim, c.FFNDim}
+	for layer := range d.blocks {
+		block := &d.blocks[layer]
+		var source LayerWeights
+		if w.Layers != nil {
+			source = w.Layers[layer]
+		}
+		for _, weight := range []decoderWeight{
+			{"attention_norm", normShape, source.AttentionNorm, &block.attentionNorm},
+			{"wq", qShape, source.WQ, &block.wq},
+			{"wk", kvShape, source.WK, &block.wk},
+			{"wv", kvShape, source.WV, &block.wv},
+			{"wo", []int64{c.Dim, c.Dim}, source.WO, &block.wo},
+			{"ffn_norm", normShape, source.FFNNorm, &block.ffnNorm},
+			{"w_gate", upShape, source.WGate, &block.gate},
+			{"w_up", upShape, source.WUp, &block.up},
+			{"w_down", downShape, source.WDown, &block.down},
+		} {
+			if err := visit(layer, weight); err != nil {
+				return fmt.Errorf("llama: layer %d: %w", layer, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (d *Decoder) loadWeights(w Weights, read func(layer int, weight decoderWeight) (name string, values []float32, err error)) error {
+	if err := d.visitWeights(w, func(layer int, weight decoderWeight) error {
+		name, values, err := read(layer, weight)
+		if err != nil {
+			return err
+		}
+		*weight.target, err = weightTensor(name, weight.shape, values)
+		return err
+	}); err != nil {
+		return err
+	}
+	if d.config.TieEmbeddings {
+		d.output = d.embedding
+	}
+	return nil
 }

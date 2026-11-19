@@ -199,3 +199,24 @@ shard files, the model-directory loader should report
 `sharded safetensors checkpoints are unsupported (expected model.safetensors)`.
 An index-aware loader can open each resolved shard with the same single-file reader.
 [Hugging Face checkpoint index format](https://huggingface.co/docs/transformers/v4.51.3/en/models#sharded-checkpoints)
+
+### Uncached checkpoint parity
+
+Run the official checkpoint's full-prefix logit check in one test process:
+
+```sh
+LLAMA_32_1B_MODEL_DIR="$model_dir" go test . -run '^TestLlama32Logits$' -count=1 -v
+```
+
+The test verifies the snapshot hashes before loading, checks every compared
+row for finite logits and the exact winning token, and compares each frozen
+sample with `abs(got - want) <= 1e-3 + 1e-3*abs(want)`. It reports the worst
+absolute error and tolerance fraction with their positions and token IDs.
+
+`LoadHFModel` validates the declared tensor inventory before reading weights.
+It copies each tensor into private decoder storage. For tied models the
+embedding also serves as the classifier. The pinned checkpoint's FP32 payload
+is 4,943,257,600 bytes. Live staging holds one converted tensor at a time.
+Q and K row permutations use a second FP32 buffer, and file reads use 64 KiB of
+scratch. The largest staging tensor is the 1,050,673,152-byte embedding.
+Process RSS also depends on garbage collection and runtime overhead.
