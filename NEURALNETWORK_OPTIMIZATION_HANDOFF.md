@@ -1,12 +1,50 @@
 # Optimization Pass 2 — speed up single-row FP32 projections
 
+## Integration result
+
+`neuralnetwork v0.10.12` (`1efde389dc71f21b37580d4325d802ce91c23620`)
+implements a four-column tile for `M=1` and uses the original dot product
+for the tail. Across five alternating fresh-process trials per build on
+Go 1.27.3, median decode fell from 1.117 to 0.327 s/token (−70.8%) and
+cached eight-token generation fell from 10.102 to 4.107 s/op (−59.35%).
+The comparison uses a fresh v0.10.11 run from the same session. The earlier
+Go 1.27.3 pre-optimization measurements are recorded below. [Full benchmark results](README.md#optimization-pass-2-go-1273)
+
+One separate CPU and allocation profile per build used the same workload.
+Times below are sampled CPU. The single-row entries use self time.
+
+| CPU profile scope | v0.10.11 | v0.10.12 |
+| --- | ---: | ---: |
+| Process total | 11.64 s | 6.35 s |
+| Prefill and decode total | 8.71 s | 3.48 s |
+| Single-row kernel, prefill and decode | 5.51 s | 1.74 s |
+| Single-row kernel, decode | 5.14 s | 1.68 s |
+| Single-row kernel, prefill classifier | 0.37 s | 0.06 s |
+| Three-row kernel self, prefill | 1.66 s | 1.24 s |
+
+The single-row work in the decode profile fell by 67.3%. Prefill also
+uses the single-row kernel for its final vocabulary projection. The
+three-row sample totals varied across the two profile runs. Both builds
+measured 198,718,008 bytes/op and 39,866 allocs/op at the median in the
+unprofiled trials. The v0.10.12 allocation profile estimates 189.08 MiB
+on generation stacks and 9,760.14 MiB under checkpoint loading.
+
+Both versions passed the full Llama test suite in default and `purego`
+builds with the pinned Llama 3.2 and TinyStories checkpoints. With v0.10.12,
+all five cached logit rows still matched their full-prefix rows exactly,
+the maximum sampled Transformers logit error was `4.95910645e-05`, and
+both CLI builds printed the frozen continuation byte for byte. Llama
+passed `go vet`. The race and Metal-tagged suites passed with synthetic
+and TinyStories coverage. The dependency's float32 product, tensor, and matrix
+suites passed in default, `purego`, race, and Metal-tagged builds.
+
 ## Target and ownership
 
-Optimize the single-input-row case of `float32product.RightTranspose` in
+Pass 2 targeted the single-input-row case of `float32product.RightTranspose` in
 `github.com/itsmontoya/neuralnetwork`. Seven cached decode steps and the
 classifier at the end of prefill use this case. Pass 1 already changed the
 kernel to read contiguous weight rows and reuse each weight load across three
-input rows. The next change should improve the single-row dot products.
+input rows.
 
 | Repository and file | Call path and responsibility |
 | --- | --- |
@@ -119,18 +157,13 @@ accounts for 21.75 MiB self. Use unprofiled `-benchmem` totals to compare
 allocation bytes and counts. `alloc_space` measures cumulative activity,
 while process peak RSS measures resident memory.
 
-## Implementation and correctness in neuralnetwork
+## Kernel design and correctness requirements
 
-Benchmark an output-column tile for `M=1`. Compute two or four dot
-products at once, reusing each input activation across that many
-contiguous weight-row streams. Give each output an independent FP32
-accumulator, with the original ascending contraction order and fused
-arithmetic on ARM64. This exposes independent work to the CPU and
-reduces input-row loads. Measure the trade-off from reading multiple
-weight streams, especially for the vocabulary projection. Start with
-portable Go and inspect the ARM64 output if the compiler does not
-generate the expected loop. Keep a scalar tail for odd output widths.
-Limit the change to the single-row kernel and its dispatch.
+The portable Go implementation computes four dot products at once for
+`M=1`, reusing each input activation across four contiguous weight-row
+streams. Each output uses an independent FP32 accumulator in the original
+ascending contraction order. Go 1.27.3 emits scalar fused multiply-adds
+on ARM64. A scalar tail covers the remaining columns.
 
 - Keep the kernel allocation-free and use call-local state, disjoint
   destinations, and read-only inputs. Exercise repeated calls with
@@ -164,37 +197,33 @@ outside the timer.
 | FFN down | `[2048,8192]` | 1, 6 |
 | Tied vocabulary | `[128256,2048]` | 1 for cached generation, 6 for full-prefix regression |
 
-From neuralnetwork, collect at least five samples per case on `v0.10.11`
-and on the candidate using the same Go 1.27.3 settings. Include the small
-and irregular cases and add a one-row tail case if the existing suite
-misses it. Compare latency, bytes, and allocations with `benchstat`.
+From neuralnetwork, use the same Go 1.27.3 settings to collect at least
+five samples per case on `v0.10.11` and `v0.10.12`. The benchmark-only
+commit `66eadf8` adds the single-row tail case for the baseline. Include
+the small and irregular cases. Compare latency, bytes, and allocations
+with `benchstat`.
 
 ```sh
 GOTOOLCHAIN=go1.27.3 GOARM64=v8.0 CGO_ENABLED=1 GOMAXPROCS=8 \
   go test ./tensor -run '^$' -bench '^BenchmarkRightTranspose$' -benchmem -count=5
 ```
 
-## Llama reproduction and acceptance
+## Reproduce the Llama comparison
 
-Work from the same Llama source on both sides. Use
-[`LLAMA_32_1B_MODEL_DIR` and the pinned snapshot](testdata/README.md#llama-32-1b-transformers-reference).
-Once the candidate exists, use an alternate modfile pointing to its local
-checkout. This keeps the tracked dependency pin out of the experiment.
+Build both binaries from the same Llama checkout after integration. Use an
+alternate modfile from the pre-integration commit for v0.10.11. Set
+[`LLAMA_32_1B_MODEL_DIR` to the pinned snapshot](testdata/README.md#llama-32-1b-transformers-reference).
 
 ```sh
 export GOTOOLCHAIN=go1.27.3 GOARM64=v8.0 CGO_ENABLED=1 GOMAXPROCS=8
 bench_dir=$(mktemp -d)
 go version
-go test -mod=readonly -c -o "$bench_dir/before.test" .
+git show bccba37:go.mod > "$bench_dir/before.mod"
+git show bccba37:go.sum > "$bench_dir/before.sum"
+go test -mod=readonly -modfile="$bench_dir/before.mod" \
+  -c -o "$bench_dir/before.test" .
 go version -m "$bench_dir/before.test"
-
-# After implementing the candidate, set nn_checkout to its absolute path.
-cp go.mod "$bench_dir/candidate.mod"
-cp go.sum "$bench_dir/candidate.sum"
-go mod edit -modfile="$bench_dir/candidate.mod" \
-  -replace="github.com/itsmontoya/neuralnetwork=$nn_checkout"
-go test -mod=readonly -modfile="$bench_dir/candidate.mod" \
-  -c -o "$bench_dir/after.test" .
+go test -mod=readonly -c -o "$bench_dir/after.test" .
 go version -m "$bench_dir/after.test"
 ```
 
@@ -265,7 +294,7 @@ CPU fell and check for regressions in the multi-row cases and prefill.
 
 With the official snapshot and pinned TinyStories 260K artifacts enabled,
 run `go test -p=1 -count=1 -timeout 45m -v ./...` on both builds. Pass
-`-modfile="$bench_dir/candidate.mod"` for the candidate. Repeat with
+`-modfile="$bench_dir/before.mod"` for v0.10.11. Repeat with
 `CGO_ENABLED=0` and `-tags=purego`. Run `go vet ./...` and
 `go test -race ./...` with the Llama 3.2 model environment variable
 unset for the race run. The real-model tests verify sampled Transformers
@@ -277,33 +306,30 @@ Expected CLI stdout is ` Paris. It is the most populous city` followed by
 one newline. The synthetic tests cover retained outputs, retries, and
 concurrent sessions.
 
-Keep the change focused on the measured kernel. Commit independently
-useful benchmark or reference coverage separately when it can stand on
-its own. Keep kernel dispatch, implementation, and tests of that
-dispatch together when they depend on one another. Stop after validating
-and remeasuring the single-row change.
-
 ## Ranked candidates for Optimization Pass 3
 
-Re-rank these with the post-change profile and an explicit latency or
-memory objective.
+The v0.10.12 profile puts the three-row kernel first for first-token
+latency and the tiled single-row kernel first for ongoing decode.
 
-1. **Three-input-row prefill kernel (neuralnetwork).** It takes 1.87 s
-   self, 75.10% of sampled prefill CPU. Keep weight-load reuse when
-   investigating first-token latency. This profile uses six prompt tokens.
-2. **Elementwise and SwiGLU allocations (neuralnetwork and Llama).**
-   Matrix adapter allocations account for 94.92 MiB self and SwiGLU
-   for 78.79 MiB inclusive, with overlapping stacks. Zeroing newly
-   allocated memory takes 0.91 s self on decode stacks. Trace the
-   allocation sites and assess direct host tensor arithmetic first.
-3. **Checkpoint conversion and copies (Llama and neuralnetwork).**
-   Model load takes 1.894 s at the median and accounts for 9,762.94 MiB
+1. **Three-input-row prefill kernel (neuralnetwork).** It takes 1.24 s
+   self, 80.0% of sampled prefill CPU on the six-token prompt. Preserve
+   weight-load reuse while evaluating first-token latency.
+2. **Remaining single-row projection cost (neuralnetwork).** The tiled
+   kernel still takes 1.68 s self, 87.0% of sampled decode CPU. Measure
+   sustained memory bandwidth on the FFN and vocabulary shapes to assess
+   how much headroom remains for further kernel work.
+3. **Elementwise and SwiGLU allocations (neuralnetwork and Llama).**
+   Matrix adapter allocations account for 82.03 MiB self and SwiGLU
+   for 75.83 MiB inclusive, with overlapping stacks. Assess how much
+   direct host tensor arithmetic can reduce this allocation traffic.
+4. **Checkpoint conversion and copies (Llama and neuralnetwork).**
+   Model load takes 1.803 s at the median and accounts for 9,760.14 MiB
    of cumulative allocations. Measure load latency and peak RSS while
    preserving validated, privately owned weights.
-4. **Host GEMM result staging (neuralnetwork).** The staging allocation
-   accounts for 21.75 MiB self. Evaluate reuse alongside the copy and
+5. **Host GEMM result staging (neuralnetwork).** The staging allocation
+   accounts for 20.12 MiB self. Evaluate reuse alongside the copy and
    coefficient pass while preserving the destination contract.
-5. **Longer-context attention and KV access (Llama).** Prefill attention
-   accounts for 7.84 MiB inclusive and cached attention for 3.02 MiB
+6. **Longer-context attention and KV access (Llama).** Prefill attention
+   accounts for 7.84 MiB inclusive and cached attention for 3.53 MiB
    inclusive. Measure longer prompts and cache histories before choosing
    a change.

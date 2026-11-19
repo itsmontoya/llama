@@ -1,7 +1,7 @@
 # llama
 
 A tiny FP32 Llama-style decoder built on
-[`neuralnetwork v0.10.11`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.11).
+[`neuralnetwork v0.10.12`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.12).
 This is the numerical baseline for a Go inference runtime. It evaluates a
 complete token prefix with batch size one and returns logits for every position.
 
@@ -13,7 +13,7 @@ limit, and tied output weights are explicit configuration.
 
 ## Generate text with Llama 3.2 1B
 
-Use Go 1.26.1 or later and an authenticated Hugging Face account with access to
+Use Go 1.27.3 or later and an authenticated Hugging Face account with access to
 `meta-llama/Llama-3.2-1B` at revision
 `4e20de362430cd3b72f300e6b0f18e50e7166e08`. Keep the six snapshot files outside
 the checkout. Set `model_dir` to that directory and `reference_python` to the
@@ -85,11 +85,40 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 2 (Go 1.27.3)
+
+`neuralnetwork v0.10.12` computes four output columns together for single-row
+FP32 projections while preserving each output's accumulation order. The
+comparison ran `BenchmarkLlama32CachedGeneration` on Go 1.27.3 for both builds
+on an Apple M3 with 24 GB RAM, macOS 26.5.2 (25F84) darwin/arm64,
+`GOARM64=v8.0`, `CGO_ENABLED=1`, default build tags, and `GOMAXPROCS=8`.
+Five trials per version ran in alternating order, with one operation per
+fresh process and zero inference warm-ups. Peak RSS came from macOS `wait4`.
+
+| Median metric | v0.10.11 | v0.10.12 | Change |
+| --- | ---: | ---: | ---: |
+| Prefill / first token (s) | 2.029 | 1.827 | −10.0% |
+| Decode (s/token) | 1.117 | 0.327 | −70.8% |
+| Decode (tokens/s) | 0.8950 | 3.062 | +242.1% |
+| Cached generation (s/op) | 10.102 | 4.107 | −59.35% |
+| Cached generation (output tokens/s) | 0.7919 | 1.948 | +146.0% |
+| Generation bytes/op | 198,718,008 | 198,718,008 | 0% |
+| Generation allocs/op | 39,866 | 39,866 | 0% |
+| Benchmark process wall (s) | 13.530 | 7.164 | −47.0% |
+| Benchmark process peak RSS (GiB) | 6.373 | 6.373 | Overlapping ranges |
+
+Cached generation ranged from 9.703–10.532 s with v0.10.11 and
+4.050–4.187 s with v0.10.12. In separate profiles, sampled CPU self time
+in the single-row product fell from 5.51 s to 1.74 s.
+[Reproduction, profile findings, and Pass 3 candidates](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
+
+#### Optimization Pass 1 (Go 1.27.2)
+
 The comparison uses `BenchmarkLlama32CachedGeneration` on Go 1.27.2,
 macOS 26.5.2 (25F84) darwin/arm64, Apple M3 (4 performance and 4 efficiency
 cores), 24 GB RAM, `CGO_ENABLED=1`, default build tags, and `GOMAXPROCS=8`.
-Both builds use the same Llama source. The baseline dependency pin and
-checksums come from the handoff commit. Each version runs five times in
+Both builds use the same Llama source. Dependency pins and checksums come
+from their respective commits. Each version runs five times in
 alternating order, with one operation per fresh process and zero inference
 warm-ups. Each trial verifies the snapshot first, so the load measurements
 can benefit from the filesystem cache.
@@ -97,9 +126,12 @@ can benefit from the filesystem cache.
 ```sh
 git show 486be90:go.mod >"$bin_dir/v0.10.10.mod"
 git show 486be90:go.sum >"$bin_dir/v0.10.10.sum"
-CGO_ENABLED=1 go test -mod=readonly -modfile="$bin_dir/v0.10.10.mod" \
-  -c -o "$bin_dir/llama-v0.10.10.test" .
-CGO_ENABLED=1 go test -mod=readonly -c -o "$bin_dir/llama-v0.10.11.test" .
+git show c49d1d3:go.mod >"$bin_dir/v0.10.11.mod"
+git show c49d1d3:go.sum >"$bin_dir/v0.10.11.sum"
+for version in v0.10.10 v0.10.11; do
+  GOTOOLCHAIN=go1.27.2 CGO_ENABLED=1 go test -mod=readonly \
+    -modfile="$bin_dir/$version.mod" -c -o "$bin_dir/llama-$version.test" .
+done
 for trial in 1 2 3 4 5; do
   if [ "$((trial % 2))" -eq 1 ]; then
     first_version=v0.10.10 second_version=v0.10.11
@@ -146,12 +178,9 @@ three-row helper fell from 37.85 s to 7.18 s. The new kernel walks contiguous
 weight rows and reuses each weight load for three input rows during prefill.
 [Pass 1 baseline profile and handoff](https://github.com/itsmontoya/llama/blob/486be9000a14aeca45c9d8a58922983287ff7d8f/NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
 
-Optimization Pass 2 uses a fresh Go 1.27.3 baseline and targets the single-row
-FP32 projection in `neuralnetwork`. [Pass 2 baseline and handoff](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
-
 ## Generate text with TinyStories 260K
 
-From this directory, with Go 1.26.1 or later, download the pinned FP32
+From this directory, with Go 1.27.3 or later, download the pinned FP32
 checkpoint and its matching 512-piece vocabulary into a temporary directory.
 Verify both SHA-256 checksums before running the command.
 
@@ -193,7 +222,7 @@ zero budget prints an empty line. An empty `-prompt` starts from BOS alone.
 
 ## Run the numerical example
 
-From this directory, with Go 1.26.1 or later:
+From this directory, with Go 1.27.3 or later:
 
 ```sh
 go run ./cmd/tiny
