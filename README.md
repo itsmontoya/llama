@@ -1,7 +1,7 @@
 # llama
 
 A tiny FP32 Llama-style decoder built on
-[`neuralnetwork v0.10.12`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.12).
+[`neuralnetwork v0.10.13`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.13).
 This is the numerical baseline for a Go inference runtime. It evaluates a
 complete token prefix with batch size one and returns logits for every position.
 
@@ -85,6 +85,13 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 3 (Go 1.27.3)
+
+The `neuralnetwork` CPU kernel tiles four output columns for three-input-row
+FP32 projections. On the pinned workload, median time to first token fell
+from 1.870 to 0.693 s, and cached generation fell from 4.917 to 3.025 s/op.
+[Paired measurements, validation, and Pass 4 candidates](OPTIMIZATION_PASS_3.md)
+
 #### Optimization Pass 2 (Go 1.27.3)
 
 `neuralnetwork v0.10.12` computes four output columns together for single-row
@@ -110,7 +117,7 @@ fresh process and zero inference warm-ups. Peak RSS came from macOS `wait4`.
 Cached generation ranged from 9.703–10.532 s with v0.10.11 and
 4.050–4.187 s with v0.10.12. In separate profiles, sampled CPU self time
 in the single-row product fell from 5.51 s to 1.74 s.
-[Reproduction, profile findings, and Pass 3 candidates](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
+[Pass 2 reproduction and profile findings](https://github.com/itsmontoya/llama/blob/aea6cf43c2e2e25592824693259fded2cac11a2e/NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
 
 #### Optimization Pass 1 (Go 1.27.2)
 
