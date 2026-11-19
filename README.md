@@ -110,7 +110,7 @@ fresh process and zero inference warm-ups. Peak RSS came from macOS `wait4`.
 Cached generation ranged from 9.703–10.532 s with v0.10.11 and
 4.050–4.187 s with v0.10.12. In separate profiles, sampled CPU self time
 in the single-row product fell from 5.51 s to 1.74 s.
-[Reproduction, profile findings, and Pass 3 candidates](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
+[Pass 2 reproduction and profile findings](https://github.com/itsmontoya/llama/blob/aea6cf43c2e2e25592824693259fded2cac11a2e/NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
 
 #### Optimization Pass 1 (Go 1.27.2)
 
