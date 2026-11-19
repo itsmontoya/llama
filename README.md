@@ -85,6 +85,46 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 5 (Go 1.27.3)
+
+`neuralnetwork v0.10.15` splits large single-row FP32 projections into
+independent output-column ranges. Each range uses the same ordered dot
+product. Seven alternating pairs ran the pinned six-token prompt and
+eight-token generation on an Apple M3 with macOS 26.5.2, Go 1.27.3,
+default tags, and `GOMAXPROCS=8`. Each fresh process timed one generation
+with zero inference warm-ups.
+
+| Metric | v0.10.14 median (range) | v0.10.15 median (range) | Median paired change |
+| --- | ---: | ---: | ---: |
+| First token (s) | 0.6935 (0.6718–0.7442) | 0.6321 (0.6289–1.7570) | −9.2% |
+| Prefill (s) | 0.6934 (0.6717–0.7441) | 0.6320 (0.6288–1.7570) | −9.2% |
+| Decode (s/token) | 0.3360 (0.3311–0.3469) | 0.0800 (0.0769–0.0920) | −76.4% |
+| Decode (tokens/s) | 2.977 (2.882–3.020) | 12.50 (10.87–13.00) | +322.9% |
+| Cached generation (s/op) | 3.0455 (3.0055–3.1727) | 1.2106 (1.1672–2.4013) | −60.7% |
+| Output (tokens/s) | 2.627 (2.522–2.662) | 6.608 (3.332–6.854) | +154.4% |
+| B/op | 130,645,272 (130,639,952–130,645,464) | 131,218,704 (131,209,480–131,230,192) | +0.44% |
+| Allocs/op | 33,675 (33,669–33,678) | 38,986 (38,962–39,011) | +15.8% |
+| Process wall (s) | 6.131 (6.069–6.336) | 4.325 (4.214–7.479) | −29.8% |
+| Peak RSS (GiB) | 6.372 (6.372–6.373) | 6.373 (5.734–6.374) | +0.01% |
+
+Decode and cached generation were faster in all seven pairs. First-token time
+was lower in six pairs and rose to 1.757 s in the other. In three separate
+32-step sustained decode pairs, the median rose from 2.95 to 12.64 tokens/s
+with identical continuation IDs and final FP32 logits. Two concurrent sessions
+sharing one decoder reached 14.67 aggregate tokens/s, up from 5.98. The
+29-token prefill benchmark retained its exact logit digest. Its three elapsed
+pairs favored v0.10.15 by 1.1% to 25.5%. The final classifier is the only
+projection in that workload that uses the new path.
+
+Timing GEMM calls across 64 decode steps put total projection wall time at
+21.32 s before and 4.86 s after. The labeled decode profile, including workers,
+sampled 16.13 s of single-row kernel self time before and 12.94 s after.
+Whole-process CPU samples rose from 21.38 s to 24.36 s across six primary
+generations. The release attributed 5.71 s to scheduler stacks. Default and
+purego fixtures matched, including the Transformers checks, cached/full-prefix
+parity, and byte-identical CLI output.
+[Benchmark reproduction](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+
 #### Optimization Pass 3 (Go 1.27.3)
 
 The `neuralnetwork` CPU kernel tiles four output columns for three-input-row
