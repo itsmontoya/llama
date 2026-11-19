@@ -180,3 +180,22 @@ The fixture uses BOS insertion, no truncation or padding, and decoding with
 special tokens skipped and whitespace cleanup disabled. For opt-in tests,
 run `--verify-only` against the checked-in manifest before setting
 `LLAMA_32_1B_MODEL_DIR` to the verified directory.
+
+### Safetensors inventory
+
+After verifying the snapshot against the manifest, compare the reader's
+descriptors with the official file inventory:
+
+```sh
+LLAMA_32_1B_MODEL_DIR="$model_dir" \
+  go test ./internal/safetensors -run '^TestLlama32SafetensorsInventory$' -count=1 -v
+```
+
+The pinned snapshot has a single `model.safetensors` file. Sharded Hugging
+Face checkpoints use `model.safetensors.index.json` with a `weight_map`
+from tensor names to shard filenames such as
+`model-00001-of-00002.safetensors`. When a directory has only an index or
+shard files, the model-directory loader should report
+`sharded safetensors checkpoints are unsupported (expected model.safetensors)`.
+An index-aware loader can open each resolved shard with the same single-file reader.
+[Hugging Face checkpoint index format](https://huggingface.co/docs/transformers/v4.51.3/en/models#sharded-checkpoints)
