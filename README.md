@@ -144,7 +144,10 @@ respectively. The sample ranges for peak RSS were 5.74–6.37 GiB and
 In separate CPU profiles, self time in the right-transposed product and its
 three-row helper fell from 37.85 s to 7.18 s. The new kernel walks contiguous
 weight rows and reuses each weight load for three input rows during prefill.
-[Baseline profile and optimization handoff](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
+[Pass 1 baseline profile and handoff](https://github.com/itsmontoya/llama/blob/486be9000a14aeca45c9d8a58922983287ff7d8f/NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
+
+Optimization Pass 2 uses a fresh Go 1.27.3 baseline and targets the single-row
+FP32 projection in `neuralnetwork`. [Pass 2 baseline and handoff](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
 
 ## Generate text with TinyStories 260K
 
