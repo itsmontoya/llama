@@ -1,15 +1,14 @@
 # Optimization Pass 3
 
-Pass 3 moved cached Llama 3.2 1B generation from **4.216 to 3.060 s/op
-(−27.4%)**. Time to first token fell from **1.881 to 0.742 s (−60.6%)**.
+Pass 3 moved cached Llama 3.2 1B generation from **4.917 to 3.025 s/op
+(−38.5%)**. Time to first token fell from **1.870 to 0.693 s (−62.9%)**.
 The change is in the shared CPU product kernel in
 `neuralnetwork`, commit `e378860ebdb6efbe835c194d80fab012c60ed256`.
 
-Llama pins the published module version
-`v0.10.13-0.20261119195252-e378860ebdb6`. Go verified the public module
-through its checksum database. The module and `go.mod` checksums match
-the archive used for the paired measurements.
-[Published upstream branch](https://github.com/itsmontoya/neuralnetwork/tree/optimization-pass-3)
+Llama pins the `neuralnetwork v0.10.13` release at `a426793`. Go verified
+the public module through its checksum database. The release's Git tree
+and extracted Go module files match the pre-release build at `e378860`.
+[Upstream release tag](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.13)
 
 ## Selected optimization
 
@@ -40,34 +39,35 @@ macOS 26.5.2 (25F84), darwin/arm64, and Go 1.27.3. Both binaries used
 Each fresh process performed one benchmark iteration with zero inference
 warm-ups. The pinned workload used six prompt tokens, one prefill, seven
 decode calls, eight generated tokens, and a context cap of 512. The Go
-binaries report `neuralnetwork v0.10.12` and
-`v0.10.13-0.20261119195252-e378860ebdb6`.
+binaries report `neuralnetwork v0.10.12` and `v0.10.13`.
 
 | Median metric | Before | After | Change |
 | --- | ---: | ---: | ---: |
-| Prefill / first token (s) | 1.881 / 1.881 | 0.7418 / 0.7419 | −60.6% |
-| Decode (s/token) | 0.3357 | 0.3311 | −1.4% |
-| Decode (tokens/s) | 2.978 | 3.020 | +1.4% |
-| Cached generation (s/op) | 4.216 | 3.060 | −27.4% |
-| Output (tokens/s) | 1.898 | 2.615 | +37.8% |
+| Prefill / first token (s) | 1.870 / 1.870 | 0.6930 / 0.6931 | −62.9% |
+| Decode (s/token) | 0.3774 | 0.3340 | −11.5% |
+| Decode (tokens/s) | 2.650 | 2.994 | +13.0% |
+| Cached generation (s/op) | 4.917 | 3.025 | −38.5% |
+| Output (tokens/s) | 1.627 | 2.645 | +62.5% |
 | Generation bytes/op | 198,718,008 | 198,723,104 | +0.003% |
 | Generation allocs/op | 39,866 | 39,869 | +0.008% |
-| Process wall (s) | 7.225 | 6.370 | −11.8% |
-| Peak RSS (GiB) | 6.3729 | 6.3728 | −0.002% |
+| Process wall (s) | 7.978 | 6.291 | −21.1% |
+| Peak RSS (GiB) | 6.3723 | 6.3728 | +0.008% |
 
 Generation improved in all seven pairs. The observed ranges were
-4.159–5.804 s/op before and 2.990–3.668 s/op after. First-token ranges
-were 1.854–2.723 s and 0.676–1.354 s. Decode, allocation, and RSS
+4.131–5.399 s/op before and 2.953–4.129 s/op after. First-token ranges
+were 1.819–2.610 s and 0.678–1.549 s. Decode, allocation, and RSS
 ranges overlapped. Process wall and RSS include snapshot verification,
-checkpoint loading, and tokenizer setup. Median tokenizer setup was
-0.167 s before and 0.198 s after, with overlapping observed ranges.
+checkpoint loading, and tokenizer setup. The earlier seven-pair comparison
+with the pre-release module measured 4.216 to 3.060 s/op for generation
+and 1.881 to 0.742 s for first token.
 
 ## Supplemental 29-token prompt
 
-Three alternating pairs timed prefill and first-token selection on the
-same checkpoint and runtime cap. The prompt was “France is a country in
-Western Europe. It shares borders with Belgium, Germany, Switzerland,
-Italy, and Spain. The capital of France is”. Median time fell from 10.045 s
+Three alternating pairs compared `v0.10.12` with the pre-release module
+at `e378860`. They timed prefill and first-token selection with the same
+checkpoint and runtime cap. The prompt was “France is a country in Western
+Europe. It shares borders with Belgium, Germany, Switzerland, Italy, and
+Spain. The capital of France is”. Median time fell from 10.045 s
 (range 9.931–10.071 s) to 4.571 s (range 4.570–4.609 s), a 54.5%
 reduction. All six trials chose token `12366` and had the same SHA-256
 over the 128,256 little-endian FP32 logits,
@@ -76,19 +76,24 @@ over the 128,256 little-endian FP32 logits,
 ## Paired profiles
 
 Separate three-operation profile runs used a 64 KiB heap sampling rate.
-The three-row product fell from **3.73 to 1.58 sampled CPU self seconds
-(−57.6%)**, or 1.243 to 0.527 sampled seconds per operation.
-Total prefill CPU fell from 4.70 to 2.15 sampled seconds. Whole-process
-CPU samples fell from 14.20 to 11.12 seconds. The decode projection
-remained the largest consumer, with 4.70 sampled self seconds out of
-6.17 seconds on post-change decode stacks.
+The three-row product fell from **4.61 to 1.17 sampled CPU self seconds
+(−74.6%)**, or 1.537 to 0.390 sampled seconds per operation.
+Total prefill CPU fell from 5.12 to 2.22 sampled seconds. Whole-process
+CPU samples fell from 14.58 to 11.49 seconds. The earlier pre-release
+profiles measured the three-row product at 3.73 and 1.58 sampled seconds.
 
-The filtered allocation profile estimated 569.86 MiB before and
-565.32 MiB after. In the after profile, elementwise stacks account for
-291.08 MiB and 52.3% of sampled objects. SwiGLU accounts for 237.44 MiB
+The two largest sources of decode CPU self time were memory zeroing
+(3.43 of 6.39 sampled seconds) and the one-row product (2.63 s). The
+pre-release profile attributed 1.07 s and 4.70 s to those paths. The
+activity shares varied across profile runs, and the paired decode timing
+and allocation ranges overlapped.
+
+The filtered allocation profile estimated 573.64 MiB before and
+576.79 MiB after. In the release profile, elementwise stacks account for
+299.62 MiB and 55.3% of sampled objects. SwiGLU accounts for 237.65 MiB
 inclusive and overlaps elementwise and activation stacks. GEMM's
-temporary product accounts for 66.83 MiB. Checkpoint loading accounts
-for 9,757.32 MiB, or 93.2% of cumulative process allocations.
+temporary product accounts for 67.34 MiB. Checkpoint loading accounts
+for 9,757.51 MiB, or 93.1% of cumulative process allocations.
 Unprofiled bytes/op and allocs/op provide the comparison for generation
 allocation totals.
 
@@ -118,22 +123,23 @@ configurations. `go vet ./...` passed in each repository.
 
 ## Optimization Pass 4 candidates
 
-1. **Single-row CPU projection.** It accounts for 4.70 of 6.17 sampled
-   decode CPU seconds (76.2%) and 4.88 of 11.12 whole-process CPU seconds.
+1. **Elementwise and SwiGLU allocations.** Elementwise accounts for about
+   52% of sampled generation allocation bytes and 55.3% of objects. The
+   binary tensor adapter alone accounts for 201.33 MiB across three operations.
+   Attribute the decode zeroing samples to their allocation sites.
+2. **Single-row CPU projection.** It accounts for 2.63 of 6.39 sampled
+   decode CPU seconds (41.2%), with 4.70 of 6.17 s in the pre-release run.
    Measure the classifier and FFN shapes independently to distinguish
    memory traffic from instruction throughput.
-2. **Elementwise and SwiGLU allocations.** Elementwise accounts for
-   51.5% of generation bytes and 52.3% of sampled objects. The binary
-   tensor adapter alone accounts for 192.58 MiB across three operations.
 3. **Remaining multi-row projection cost.** The updated kernel still
-   accounts for 1.58 of 2.15 prefill CPU seconds (73.5%). Measure
+   accounts for 1.17 of 2.22 sampled prefill CPU seconds (52.7%). Measure
    shorter tails and longer prompt sizes separately.
 4. **Checkpoint conversion and weight ownership.** Loading accounts
-   for 93.2% of cumulative process allocations and 1.827 s of median
+   for 93.1% of cumulative process allocations and 1.830 s of median
    setup wall time. This is the leading allocation target for cold
    command startup.
 5. **Host GEMM result staging.** The temporary product represents
-   11.8% of generation allocation bytes. Any change must preserve
+   11.7% of generation allocation bytes. Any change must preserve
    destination and error semantics.
 6. **Longer-context attention and KV cache.** Cached attention had
    little sampled CPU time with a 13-position cache. A sustained
@@ -156,7 +162,7 @@ cp "$bench_dir/before.mod" "$bench_dir/after.mod"
 cp "$bench_dir/before.sum" "$bench_dir/after.sum"
 
 go get -modfile="$bench_dir/after.mod" \
-  github.com/itsmontoya/neuralnetwork@v0.10.13-0.20261119195252-e378860ebdb6
+  github.com/itsmontoya/neuralnetwork@v0.10.13
 go mod tidy -modfile="$bench_dir/after.mod"
 
 for build in before after; do
