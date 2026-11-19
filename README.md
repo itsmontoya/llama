@@ -1,7 +1,7 @@
 # llama
 
 A tiny FP32 Llama-style decoder built on
-[`neuralnetwork v0.10.10`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.10).
+[`neuralnetwork v0.10.11`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.11).
 This is the numerical baseline for a Go inference runtime. It evaluates a
 complete token prefix with batch size one and returns logits for every position.
 
@@ -76,7 +76,7 @@ Press Ctrl-D to exit. The example loads the model once and treats each question
 as a fresh completion. It also accepts one question per line from a pipe.
 Use `-max-new-tokens` to change the answer budget, which defaults to 16.
 
-### CPU baseline
+### CPU performance
 
 The pinned prompt encodes to six tokens, including BOS. The eight-token output
 budget uses one prefill and seven decode calls. The runtime cap is 512, and the
@@ -85,20 +85,33 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
-The measurement uses `BenchmarkLlama32CachedGeneration` on Go 1.27.2,
+The comparison uses `BenchmarkLlama32CachedGeneration` on Go 1.27.2,
 macOS 26.5.2 (25F84) darwin/arm64, Apple M3 (4 performance and 4 efficiency
 cores), 24 GB RAM, `CGO_ENABLED=1`, default build tags, and `GOMAXPROCS=8`.
-It runs one inference trial per fresh process, with three repeats and zero
-inference warm-ups. Each trial verifies the snapshot first, so the load
-measurements can benefit from the filesystem cache.
+Both builds use the same Llama source. The baseline dependency pin and
+checksums come from the handoff commit. Each version runs five times in
+alternating order, with one operation per fresh process and zero inference
+warm-ups. Each trial verifies the snapshot first, so the load measurements
+can benefit from the filesystem cache.
 
 ```sh
-CGO_ENABLED=1 go test -c -o "$bin_dir/llama.test" .
-for trial in 1 2 3; do
-  LLAMA_32_1B_MODEL_DIR="$model_dir" GOMAXPROCS=8 \
-    /usr/bin/time -l "$bin_dir/llama.test" -test.run '^$' \
-    -test.bench '^BenchmarkLlama32CachedGeneration$' -test.benchtime 1x \
-    -test.benchmem -test.timeout 15m -test.v
+git show 486be90:go.mod >"$bin_dir/v0.10.10.mod"
+git show 486be90:go.sum >"$bin_dir/v0.10.10.sum"
+CGO_ENABLED=1 go test -mod=readonly -modfile="$bin_dir/v0.10.10.mod" \
+  -c -o "$bin_dir/llama-v0.10.10.test" .
+CGO_ENABLED=1 go test -mod=readonly -c -o "$bin_dir/llama-v0.10.11.test" .
+for trial in 1 2 3 4 5; do
+  if [ "$((trial % 2))" -eq 1 ]; then
+    first_version=v0.10.10 second_version=v0.10.11
+  else
+    first_version=v0.10.11 second_version=v0.10.10
+  fi
+  for version in "$first_version" "$second_version"; do
+    LLAMA_32_1B_MODEL_DIR="$model_dir" GOMAXPROCS=8 \
+      /usr/bin/time -l "$bin_dir/llama-$version.test" -test.run '^$' \
+      -test.bench '^BenchmarkLlama32CachedGeneration$' -test.benchtime 1x \
+      -test.benchmem -test.timeout 15m -test.v
+  done
 done
 ```
 
@@ -106,27 +119,32 @@ done
 loading and prompt encoding. Cache allocation is reported separately. Prefill
 returns the final prompt logit row, and first-token time adds greedy selection.
 Decode throughput counts only the seven predictions after prefill, including
-greedy selection. The benchmark excludes CLI flag parsing, and its stage
-metrics exclude snapshot hashing and suffix text decoding. macOS
-`/usr/bin/time -l` reports maximum resident set size for the complete process.
+greedy selection. The generation timer includes session allocation and suffix
+decoding. Process wall time and peak RSS also include checkpoint hashing,
+model loading, and tokenizer setup. RSS for this comparison came from macOS
+`wait4`, which is also used by `/usr/bin/time -l`.
 
-| Trial | Model load (s) | Tokenizer setup (s) | Prefill (s) | First token (s) | Decode (s) | Decode tokens/s | Peak RSS (GiB) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 2.859 | 0.190 | 19.17 | 19.17 | 28.89 | 0.2423 | 5.806 |
-| 2 | 1.868 | 0.173 | 17.92 | 17.92 | 29.02 | 0.2412 | 6.373 |
-| 3 | 1.898 | 0.173 | 19.06 | 19.06 | 29.20 | 0.2398 | 6.301 |
+| Median metric | v0.10.10 | v0.10.11 | Change |
+| --- | ---: | ---: | ---: |
+| Prefill / first token (s) | 18.620 | 2.085 | −88.8% |
+| Decode (s/token) | 4.054 | 1.119 | −72.4% |
+| Decode (tokens/s) | 0.2466 | 0.8940 | +262.5% |
+| Cached generation (s/op) | 47.213 | 10.222 | −78.4% |
+| Cached generation (output tokens/s) | 0.1694 | 0.7827 | +361.9% |
+| Generation bytes/op | 198,717,800 | 198,717,992 | <0.01% |
+| Generation allocs/op | 39,863 | 39,866 | <0.01% |
+| Benchmark process wall (s) | 51.076 | 13.317 | −73.9% |
+| Benchmark process peak RSS (GiB) | 6.23 | 6.37 | Overlapping ranges |
 
-The built native and pure-Go commands matched the frozen stdout in 50.26 s
-and 51.63 s end to end. The separate CLI integration test matched all prompt
-IDs, generated IDs, and stdout in both cached and uncached modes. The cached
-test case took 52.24 s and the uncached case took 310.13 s, including loading
-and tokenizer setup.
+Cached generation ranged from 46.03–47.27 s with v0.10.10 and 9.82–10.81 s
+with v0.10.11. Model-load times ranged from 1.81–2.87 s and 1.83–2.58 s,
+respectively. The sample ranges for peak RSS were 5.74–6.37 GiB and
+5.80–6.37 GiB.
 
-Cache allocation took 9–21 microseconds per trial. First-token times round to
-the same values as prefill at the displayed precision. Prefill and decode took
-about 47–48 seconds combined and allocated about 199 MB per trial after setup.
-Profile the CPU projection kernels and temporary tensor allocations separately
-in follow-up work. [CPU performance backlog](NEEDS.md#llnn-08-cpu-performance-that-represents-generation)
+In separate CPU profiles, self time in the right-transposed product and its
+three-row helper fell from 37.85 s to 7.18 s. The new kernel walks contiguous
+weight rows and reuses each weight load for three input rows during prefill.
+[Baseline profile and optimization handoff](NEURALNETWORK_OPTIMIZATION_HANDOFF.md)
 
 ## Generate text with TinyStories 260K
 
