@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itsmontoya/llama"
 	"github.com/itsmontoya/llama/internal/tokenizer"
 )
 
@@ -29,12 +28,20 @@ func TestGenerateArgumentErrors(t *testing.T) {
 		{"unknown flag", []string{"-unknown"}, "flag provided but not defined"},
 		{"invalid limit", []string{"-max-new-tokens", "three"}, "invalid value"},
 		{"negative limit", []string{"-model", "model.bin", "-tokenizer", "tokens.bin", "-max-new-tokens", "-1"}, "must be nonnegative"},
+		{"HF with model", []string{"-hf-model-dir", "snapshot", "-model", "model.bin"}, "cannot be combined"},
+		{"HF with tokenizer", []string{"-hf-model-dir", "snapshot", "-tokenizer="}, "cannot be combined"},
+		{"empty HF path", []string{"-hf-model-dir="}, "requires a nonempty directory path"},
+		{"context with legacy", []string{"-model", "model.bin", "-tokenizer", "tokens.bin", "-context", "512"}, "-context requires -hf-model-dir"},
+		{"invalid context", []string{"-hf-model-dir", "snapshot", "-context", "three"}, "invalid value"},
+		{"zero context", []string{"-hf-model-dir", "snapshot", "-context", "0"}, "-context must be positive"},
+		{"negative context", []string{"-hf-model-dir", "snapshot", "-context", "-1"}, "-context must be positive"},
+		{"HF negative limit", []string{"-hf-model-dir", "snapshot", "-max-new-tokens", "-1"}, "must be nonnegative"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			status := run(test.args, &stdout, &stderr)
-			if status == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), test.want) {
-				t.Fatalf("exit = %d, stdout = %q, stderr = %q, want a failure mentioning %q", status, stdout.String(), stderr.String(), test.want)
+			_, status := run(test.args, &stdout, &stderr)
+			if status != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("exit = %d, stdout = %q, stderr = %q, want exit 2 mentioning %q", status, stdout.String(), stderr.String(), test.want)
 			}
 		})
 	}
@@ -56,7 +63,7 @@ func TestGenerateSynthetic(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			args := append([]string{"-model", modelPath, "-tokenizer", tokenizerPath}, test.args...)
 			var stdout, stderr bytes.Buffer
-			status := run(args, &stdout, &stderr)
+			_, status := run(args, &stdout, &stderr)
 			if status != 0 || stderr.Len() != 0 || stdout.String() != test.want {
 				t.Fatalf("exit = %d, stdout = %q, stderr = %q, want success with stdout %q", status, stdout.String(), stderr.String(), test.want)
 			}
@@ -66,7 +73,7 @@ func TestGenerateSynthetic(t *testing.T) {
 	t.Run("prompt exceeds context", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		args := []string{"-model", modelPath, "-tokenizer", tokenizerPath, "-prompt", strings.Repeat("!", 20)}
-		status := run(args, &stdout, &stderr)
+		_, status := run(args, &stdout, &stderr)
 		if status == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "prefix length") {
 			t.Fatalf("exit = %d, stdout = %q, stderr = %q, want a context failure", status, stdout.String(), stderr.String())
 		}
@@ -182,34 +189,18 @@ func TestStories260KGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoder, err := llama.LoadLegacyModel(modelPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	vocab, err := tokenizer.Load(tokenizerPath, decoder.Config().VocabSize)
-	if err != nil {
-		t.Fatal(err)
-	}
-	promptIDs, err := vocab.Encode(fixture.Prompt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(promptIDs, fixture.PromptIDs) {
-		t.Fatalf("prompt IDs = %v, want %v", promptIDs, fixture.PromptIDs)
-	}
-	generatedIDs, err := decoder.GenerateGreedy(promptIDs, fixture.MaxNewTokens, tokenizer.BOS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(generatedIDs, fixture.GeneratedIDs) {
-		t.Fatalf("generated IDs = %v, want %v", generatedIDs, fixture.GeneratedIDs)
-	}
 	var stdout, stderr bytes.Buffer
 	args := []string{"-model", modelPath, "-tokenizer", tokenizerPath, "-prompt", fixture.Prompt}
-	status := run(args, &stdout, &stderr)
+	got, status := run(args, &stdout, &stderr)
 	wantStdout := string(want) + "\n"
 	if status != 0 || stderr.Len() != 0 || stdout.String() != wantStdout {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %q, want success with stdout %q", status, stdout.String(), stderr.String(), wantStdout)
 	}
-	t.Logf("prompt IDs: %v, generated IDs: %v, stdout: %q", promptIDs, generatedIDs, stdout.String())
+	if !slices.Equal(got.promptIDs, fixture.PromptIDs) {
+		t.Errorf("prompt IDs = %v, want %v", got.promptIDs, fixture.PromptIDs)
+	}
+	if !slices.Equal(got.suffixIDs, fixture.GeneratedIDs) {
+		t.Errorf("generated IDs = %v, want %v", got.suffixIDs, fixture.GeneratedIDs)
+	}
+	t.Logf("prompt IDs: %v, generated IDs: %v, stdout: %q", got.promptIDs, got.suffixIDs, stdout.String())
 }
