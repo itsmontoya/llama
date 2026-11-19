@@ -63,6 +63,19 @@ CGO_ENABLED=0 go build -tags=purego -o "$bin_dir/generate-purego" ./cmd/generate
   -prompt 'The capital of France is' -max-new-tokens 8
 ```
 
+### Ask questions in the terminal
+
+Run the interactive example with the same verified model directory:
+
+```sh
+go run ./cmd/example -hf-model-dir "$model_dir"
+```
+
+Type a question such as `What is the capital of France?` and press Enter.
+Press Ctrl-D to exit. The example loads the model once and treats each question
+as a fresh completion. It also accepts one question per line from a pipe.
+Use `-max-new-tokens` to change the answer budget, which defaults to 16.
+
 ### CPU baseline
 
 The pinned prompt encodes to six tokens, including BOS. The eight-token output
