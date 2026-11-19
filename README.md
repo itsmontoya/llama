@@ -85,6 +85,13 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 3 (Go 1.27.3)
+
+The `neuralnetwork` candidate tiles four output columns for three-input-row
+FP32 projections. On the pinned workload, median time to first token fell
+from 1.881 to 0.742 s, and cached generation fell from 4.216 to 3.060 s/op.
+[Paired measurements, validation, and Pass 4 candidates](OPTIMIZATION_PASS_3.md)
+
 #### Optimization Pass 2 (Go 1.27.3)
 
 `neuralnetwork v0.10.12` computes four output columns together for single-row
