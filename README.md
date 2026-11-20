@@ -85,6 +85,38 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 6 (Go 1.27.3)
+
+`neuralnetwork v0.10.16` parallelizes complete three-row groups in host
+FP32 projections, partitioning output columns across up to eight workers.
+Twelve alternating pairs used the pinned six-token prompt and eight-token
+continuation on Apple M3 with `GOMAXPROCS=8`. Each fresh process timed one
+generation with zero inference warm-ups.
+
+| Metric | v0.10.15 median (range) | v0.10.16 median (range) | Median paired change |
+| --- | ---: | ---: | ---: |
+| First token (s) | 0.647 (0.627–1.398) | 0.213 (0.175–1.503) | −66.2% |
+| Cached generation (s/op) | 1.237 (1.183–2.994) | 1.020 (0.721–2.613) | −36.3% |
+| Output (tokens/s) | 6.47 (2.67–6.76) | 8.34 (3.06–11.10) | +56.9% |
+| Bytes/op | 131,219,668 (131,204,256–131,233,256) | 131,316,912 (131,312,336–131,339,624) | +0.08% |
+| Allocs/op | 38,984 (38,957–39,013) | 39,888 (39,880–39,930) | +2.32% |
+| Process wall (s) | 4.399 (4.181–7.026) | 4.132 (3.764–5.814) | −11.0% |
+| Peak RSS (GiB) | 6.373 (5.347–6.375) | 6.353 (5.457–6.374) | −0.10% |
+
+First-token latency was lower in ten pairs. Cached generation was faster
+in nine, with paired changes from −47.2% to +115.2%. The 29-token prefill
+fell from 5.183 to 3.149 s at the median and improved in all five pairs.
+Sustained decode was inconclusive across seven 32-step pairs. Both builds
+produced the same continuation and supplemental FP32 logit hashes.
+
+The median wall time spent in the six-row block projections fell from
+0.621 to 0.150 s across three timing pairs, including one slower release
+run. Across six profiled primary prefills, those kernels sampled 2.12 s
+of CPU before and 1.47 s after. In the release's 29-token profile, complete
+three-row groups accounted for 45.6% of prefill CPU and the two scalar
+remainder rows accounted for 37.3%.
+[Benchmark reproduction and initial baseline](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+
 #### Optimization Pass 5 (Go 1.27.3)
 
 `neuralnetwork v0.10.15` splits large single-row FP32 projections into
@@ -123,7 +155,7 @@ Whole-process CPU samples rose from 21.38 s to 24.36 s across six primary
 generations. The release attributed 5.71 s to scheduler stacks. Default and
 purego fixtures matched, including the Transformers checks, cached/full-prefix
 parity, and byte-identical CLI output.
-[Benchmark reproduction](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+[Benchmark reproduction](https://github.com/itsmontoya/llama/blob/c49966b8b45509d5d0882372531addac0c72a28c/NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
 
 #### Optimization Pass 3 (Go 1.27.3)
 
