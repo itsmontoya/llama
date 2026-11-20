@@ -85,6 +85,28 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 8 (Go 1.27.3)
+
+`neuralnetwork v0.10.18` uses an eight-column ARM64 NEON tile for ordered FP32
+single-row projection. It preserves the original weight layout, ascending
+accumulation order, and worker policy. The measurements use the pinned
+Llama 3.2 1B fixture on Apple M3 with `GOMAXPROCS=8`.
+
+| Workload | v0.10.17 median | v0.10.18 median | Median paired change |
+| --- | ---: | ---: | ---: |
+| Sustained decode latency | 80.50 ms/token | 69.49 ms/token | −13.7% |
+| Sustained decode throughput | 12.42 tokens/s | 14.39 tokens/s | +15.9% |
+| Two-session sustained decode | 15.27 tokens/s | 17.28 tokens/s | +13.2% |
+| Cached eight-token generation | 0.731 s | 0.671 s | −8.8% |
+| Primary TTFT | 174.8 ms | 179.1 ms | +2.2% |
+
+Sustained and concurrent decode improved in all seven pairs. Cached generation
+improved in all 12. TTFT varied across runs, and the 27-, 28-, and 29-token
+prefill guards stayed within the 5% threshold at the paired median. The pinned
+logit, continuation, and CLI output checks passed.
+
+[Pass 8 results, profiles, and reproduction](OPTIMIZATION_PASS_8.md)
+
 #### Optimization Pass 7 (Go 1.27.3)
 
 `neuralnetwork v0.10.17` processes one- and two-row FP32 prefill remainders
@@ -108,7 +130,7 @@ tile. Primary and sustained decode effects were inconclusive across 12
 and seven pairs. The 27-token and concurrent guards had paired median changes of
 −0.4% and +0.4%. All pinned continuation and supplemental
 logit checks matched.
-[Baseline, benchmark commands, and upstream handoff](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+[Baseline, benchmark commands, and upstream handoff](https://github.com/itsmontoya/llama/blob/f01bb94917c6e5ecef55876b21ed2a724d351a0a/NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
 
 #### Optimization Pass 6 (Go 1.27.3)
 
