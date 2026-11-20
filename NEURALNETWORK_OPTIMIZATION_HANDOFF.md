@@ -1,256 +1,270 @@
-# Neuralnetwork handoff for Llama Optimization Pass 6
+# Neuralnetwork handoff for Llama Optimization Pass 7
 
 ## Objective
 
-Reduce cached Llama 3.2 1B time to first token by accelerating evaluation of complete three-row groups in the host FP32 right-transposed matrix product. Start by testing bounded output-column parallelism for sufficiently large products. Deliver one optimization upstream. Llama is paused pending the result.
+Reduce host FP32 right-transposed GEMM latency for one- and two-row remainders after complete three-row groups. Use `neuralnetwork v0.10.16` at `222fdc71d51eef23bc4a7edaeaeacc18e5ca7b7a` as the upstream baseline. Keep the public API, output bits, and backend contracts. Evaluate the same scalar two-row path at standalone `M=2` as part of this change.
 
-## Baseline and environment
+## Problem
 
-Llama `cd74e6d48064f4eec20549a0fccd5c64d4fed14d` pins neuralnetwork `v0.10.15`, which resolves to `59e0dd572621490bf5b9cd374c47f6595235bce7`. `go mod verify` passed. The freshly compiled test binary reported Go 1.27.3 and module checksum `h1:PV7ZmnGCA9uGV43XoMEoZ9NBc4gbFvexngFH6nmdNJA=`.
+Llama's 27-, 28-, and 29-token prefills all project nine complete three-row groups per block projection. At 28 and 29 tokens the caller waits for one or two serial scalar rows after the group workers join. In five fresh runs per length, median prefill rose from 0.689 s to 1.628 s and 2.619 s. The one-row and two-row scalar loops separately accounted for 1.63 s and 3.90 s of aggregate CPU across three profiled prefills per length. The six-token primary prompt has two complete groups and zero remainder rows. It serves as a regression guard, as do sustained decode and concurrent six-token prefill.
 
-The host was an Apple M3 on AC power, macOS 26.5.2 (25F84), darwin/arm64, `GOARM64=v8.0`, `GOMAXPROCS=8`, `CGO_ENABLED=1`, default tags, and no workspace overrides. The Meta snapshot revision was `4e20de362430cd3b72f300e6b0f18e50e7166e08`. The benchmarks verify all six fixture files against Llama's manifest on every process. Each unprofiled observation ran a single timed operation in a fresh process with zero inference warm-ups. The process wall clock and Darwin peak RSS include verified snapshot loading and setup. TTFT starts at prefill and ends at the first greedy selection. Session creation has its own timer.
+## Fresh Profiling Evidence
 
-### Six-token primary benchmark
+### Baseline and workload
 
-`BenchmarkLlama32CachedGeneration` uses `The capital of France is`, context cap 512, cache capacity 13, one prefill and seven decode steps to generate eight tokens. It verifies the frozen IDs and decoded bytes. Output rate is eight tokens divided by the timed generation operation. Decode rate uses seven steps.
+Llama `5fb56f5bd22ec0f8157b3664fd2ef0d914dbd785` includes the completed Pass 6 integration and README results. Its Go 1.27.3 build uses `neuralnetwork v0.10.16` with sum `h1:T4UdQg2b1p0K8g4uRkV8xeTvTvCNst59gFfGeMiTirc=`, `github.com/tphakala/simd v1.3.0`, and `golang.org/x/sys v0.45.0`. The module cache verified successfully. Measurements used Apple M3 (four performance and four efficiency cores, 24 GB RAM) on AC power, macOS 26.5.2 (25F84), Darwin arm64, default build tags, `GOARM64=v8.0`, `GOMAXPROCS=8`, `CGO_ENABLED=1`, empty `GOFLAGS`, and `GOWORK=off`.
 
-| Metric | Median | Range, seven runs |
+Use `meta-llama/Llama-3.2-1B` snapshot `4e20de362430cd3b72f300e6b0f18e50e7166e08`. Each process verifies the sizes and SHA-256 hashes of all six files against `testdata/llama32_manifest.json`. The primary workload is `The capital of France is`, six tokens with BOS and eight greedy selections using one prefill and seven decode calls. Context cap is 512, and session capacity is 13. TTFT includes the first greedy selection and excludes cache creation. The decode metric includes greedy selection for the remaining seven outputs. Sustained decode times positions 6–37, including greedy selection with session creation and initial prefill outside the timed interval.
+
+The 29-token prompt is `France is a country in Western Europe. It shares borders with Belgium, Germany, Switzerland, Italy, and Spain. The capital of France is`. Tokenize it once with BOS and use its first 27 or 28 IDs for those diagnostics. Their timed intervals cover prefill and greedy selection. The two-session guard launches both six-token prefills against one shared decoder with independent caches. Fresh processes ran one timed operation at `-test.benchtime 1x`, with zero inference warm-ups. The primary, sustained, and 29-token results use the tracked benchmarks. The 27/28 and concurrent runs reuse the Pass 6 diagnostic overlay. Whole-process wall and Darwin peak RSS include manifest verification, loading, tokenizer setup, and inference.
+
+| Primary metric, 12 trials | Median | Range |
 | --- | ---: | ---: |
-| Prefill (s) | 1.0020 | 0.6149–1.3180 |
-| TTFT (s) | 1.0020 | 0.6150–1.3180 |
-| Decode (s/token) | 0.08234 | 0.07679–0.13749 |
-| Decode (tokens/s) | 12.14 | 7.27–13.02 |
-| Cached generation (s/op) | 1.5672 | 1.1526–2.2413 |
-| Output (tokens/s) | 5.105 | 3.569–6.941 |
-| Bytes/op | 131,221,784 | 131,213,192–131,223,888 |
-| Allocs/op | 38,990 | 38,972–38,998 |
-| Process wall (s) | 5.2443 | 4.1414–5.8853 |
-| Peak RSS (GiB) | 6.3345 | 6.0800–6.3737 |
+| Prefill (s) | 0.1838 | 0.1736–1.727 |
+| TTFT (s) | 0.1839 | 0.1737–1.727 |
+| Decode (s/token) | 0.08091 | 0.07754–0.14657 |
+| Decode (tokens/s) | 12.36 | 6.820–12.90 |
+| Cached generation (s/op) | 0.7502 | 0.7237–2.5893 |
+| Output (tokens/s) | 10.66 | 3.09–11.05 |
+| Bytes/op | 131,321,784 | 131,309,936–131,334,112 |
+| Allocs/op | 39,896 | 39,869–39,915 |
+| Process wall (s) | 3.831 | 3.754–6.013 |
+| Peak RSS (GiB) | 6.374 | 6.170–6.375 |
+| Model load (s), excluding snapshot verification | 1.859 | 1.823–2.931 |
+| Tokenizer setup (s) | 0.1681 | 0.1592–0.5309 |
 
-In run order, TTFT was 1.0020, 1.2000, 0.6378, 1.2790, 0.6282, 1.3180, and 0.6150 s. Decode was 0.08073, 0.08961, 0.07786, 0.13749, 0.08234, 0.10769, and 0.07679 s/token. Cached generation was 1.5672, 1.8270, 1.1829, 2.2413, 1.2047, 2.0716, and 1.1526 s/op. Report paired distributions on return. The spread in the fresh primary data makes isolated best runs or a comparison to historical medians inadequate.
-
-### Sustained decode and 29-token prefill
-
-`BenchmarkLlama32SustainedDecode` times 32 calls to `Session.Decode` and greedy selection at positions 6–37. Its timer excludes snapshot verification, model load, tokenizer and session creation, and prefill. Eight-step windows ranged from 0.613 to 0.649 s. `BenchmarkLlama32SupplementalPrefill` times only prefill and greedy selection for `France is a country in Western Europe. It shares borders with Belgium, Germany, Switzerland, Italy, and Spain. The capital of France is`.
-
-| Metric | Sustained median (range, three runs) | 29-token median (range, three runs) |
-| --- | ---: | ---: |
-| s/op | 2.5115 (2.4806–2.5418) | 5.1383 (5.0225–5.2879) |
-| Decode s/token | 0.07848 (0.07752–0.07943) | — |
-| Decode tokens/s | 12.74 (12.59–12.90) | — |
-| Bytes/op | 329,900,064 (329,891,744–329,903,696) | 282,316,136 (282,316,024–282,321,520) |
-| Allocs/op | 149,742 (149,725–149,749) | 5,975 (5,974–5,983) |
-| Process wall (s) | 6.2326 (6.1804–6.2496) | 8.2413 (8.1999–8.4481) |
-| Peak RSS (GiB) | 6.3764 (6.3762–6.3765) | 6.3562 (6.2972–6.3710) |
-
-The 29-token winner was `12366` and its little-endian FP32 logit SHA-256 was `6ffb4dc93003480aebdd51e9f1fee47ae3836eea9fb35ce2508f5d618a9871a5`. The sustained digest was `b72d983e8b5c45f83ad858b52f1d27b87a7ad8118be6c5d315db2ea6fc6fd84a`, with the same IDs in every repetition, starting with the prefill winner.
-
-```text
-12366 13 1102 374 279 1455 95551 3363 304 9822 323 279 3224 753 6864 323 7928 3363 13 12366 374 279 1455 95551 16036 3158 304 279 7665 9323 323 279 1917
-```
-
-## Problem and selection evidence
-
-Fresh CPU profiles used runtime phase labels around `Session.Prefill` plus greedy selection and around the decode loop. Goroutines created within those calls inherit the label, so the aggregate includes the single-row GEMM workers. The table uses self samples at the named kernel or the source lines of the scalar row loop, divided by the sampled CPU attributed to the phase. Total projection self samples are the sum of those disjoint entries. Inclusive time, including scheduler samples below a kernel, can differ. Parallel worker CPU is summed across threads. Separate Llama-side wall measurements used a timing-only test overlay on the `project` helper.
-
-| Profile scope | Phase CPU | Three-row groups | One scalar row | Two scalar rows | Single-row kernel | All projection kernels |
+| Workload | Trials | Timed s/op, median (range) | B/op, median (range) | Allocs/op, median (range) | Process wall s, median (range) | RSS GiB, median (range) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Primary prefill, 6 iterations | 3.44 s | 2.64 s (76.7%) | — | — | 0.38 s (11.0%) | 3.02 s (87.8%) |
-| Primary decode, 42 steps | 9.24 s | — | — | — | 8.31 s (89.9%) | 8.31 s (89.9%) |
-| Sustained decode, 64 steps | 14.40 s | — | — | — | 13.16 s (91.4%) | 13.16 s (91.4%) |
-| 27-token prefill, 3 iterations | 7.25 s | 5.83 s (80.4%) | — | — | 0.29 s (4.0%) | 6.12 s (84.4%) |
-| 28-token prefill, 3 iterations | 10.12 s | 5.99 s (59.2%) | 2.27 s (22.4%) | — | 0.60 s (5.9%) | 8.86 s (87.5%) |
-| 29-token prefill, 3 iterations | 12.40 s | 6.08 s (49.0%) | — | 4.16 s (33.5%) | 0.57 s (4.6%) | 10.81 s (87.2%) |
+| Sustained decode, 32 steps | 7 | 2.631 (2.510–4.074) | 329,811,232 (329,804,320–329,824,952) | 149,563 (149,548–149,587) | 5.964 (5.773–7.399) | 6.376 (6.363–6.378) |
+| 27-token prefill | 5 | 0.689 (0.687–1.439) | 261,768,768 (261,765,264–261,793,144) | 7,058 (7,053–7,106) | 3.790 (3.761–5.645) | 6.373 (5.626–6.374) |
+| 28-token prefill | 5 | 1.628 (1.627–2.465) | 271,349,696 (271,343,352–271,353,528) | 7,046 (7,037–7,058) | 4.775 (4.669–6.125) | 6.373 (6.046–6.374) |
+| 29-token prefill | 5 | 2.619 (2.514–3.494) | 282,514,808 (282,492,352–282,527,536) | 7,081 (7,032–7,105) | 5.733 (5.537–7.492) | 6.372 (5.959–6.372) |
+| Two concurrent six-token prefills | 3 | 0.377 (0.285–1.249) | 116,467,976 (116,462,224–116,479,320) | 13,982 (13,963–14,019) | 3.447 (3.364–4.573) | 6.372 (6.351–6.374) |
 
-The 27- and 28-token diagnostics are prefixes of the same encoded 29-token workload. All three run nine complete groups per block projection. Their elapsed time under profiling was 2.751, 3.961, and 4.868 s/op. Use the per-line samples and shape experiments for attribution because the three elapsed results come from separate processes. In the 28- and 29-token profiles, the scalar time is itemized on the fallback loop in `product.go:66–78`. The final classifier uses the tuned M=1 kernel in every cached prefill.
+Sustained decode separately reached 12.16 tokens/s (7.854–12.75), or 0.08222 s/token (0.07844–0.12730). Across the five rounds, the 28-token prompt took a median 0.940 s longer than the 27-token prompt (0.841–1.776 s). At 29 tokens the corresponding difference was 1.931 s (1.075–2.795 s). All five rounds showed both increases. The differences also include the ordinary cost of processing more tokens in attention and activations.
 
-Across three timing-only primary trials, prefill wall was 0.619–0.676 s. The complete M=6 block projections occupied 0.584–0.632 s, including 0.482–0.523 s across gate, up and down combined. The M=1 classifier occupied 0.014–0.024 s. Across three separate 32-step trials, all decode projections took 95.6–95.7% of elapsed decode, leaving 0.111–0.149 s total for the rest of the phase. The decode projection path is already parallel. At 0.07848 s/token, one logical visit to 4.94 GB of weights per token corresponds to about 63.0 GB/s of weight payload. This calculation describes logical work per second. Labeled sustained decode also sampled 1.17 s (8.1%) in `runtime.pthread_cond_signal`. The stack-filtered caller profile sampled 0.060 s under `attendCached` and 0.170 s of memory zeroing across 64 steps. Caller-stack totals exclude parallel workers. The 38-position maximum in this workload bounds the conclusion about attention and KV access.
+### CPU and wall time
 
-### Allocation and setup evidence
+A Llama-only overlay applied pprof labels to manifest verification, loading, tokenizer setup, prefill, first greedy selection, short decode, sustained decode, and decode greedy selection. A nested projection label followed workers and distinguished classifier, KV, Q/O, gate/up, and down. Table entries for kernels are exclusive CPU samples and their fraction of phase CPU. CPU seconds sum sampling across workers. Elapsed seconds come from phase timers, whose profiles may affect latency. Each CPU sample represented 10 ms.
 
-Unmodified benchmark binaries captured allocation profiles in separate processes at a 65,536-byte sampling rate. The sampled counts are estimates with considerable variance for small objects. The benchmark allocation counters above are the totals for individual timed runs. Profile sizes below use MiB. Inclusive stacks overlap.
+| Phase | Labeled CPU | Complete groups | One-row remainder | Two-row remainder | Standalone M=1 blocks | M=1 classifier | Profiled elapsed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Primary prefill ×6 | 7.33 s | 6.25 s (85.3%) | — | — | — | 0.85 s (11.6%) | 1.867 s |
+| Primary short decode, 42 steps | 9.62 s | — | — | — | 5.89 s (61.2%) | 2.71 s (28.2%) | 3.565 s |
+| Sustained decode, 64 steps | 14.09 s | — | — | — | 8.69 s (61.7%) | 3.92 s (27.8%) | 5.124 s |
+| Prefill 27 ×3 | 10.92 s | 9.46 s (86.6%) | — | — | — | 0.67 s (6.1%) | 3.360 s |
+| Prefill 28 ×3 | 12.81 s | 9.13 s (71.3%) | 1.63 s (12.7%) | — | — | 0.40 s (3.1%) | 5.854 s |
+| Prefill 29 ×3 | 11.97 s | 6.09 s (50.9%) | — | 3.90 s (32.6%) | — | 0.52 s (4.3%) | 8.212 s |
 
-| Scope | Sampled allocation | Attribution |
-| --- | ---: | --- |
-| Primary, whole process, 2 loads / 6 generations | 20,554.78 MiB | `LoadHFModel` 19,516.30 MiB (94.95%). BF16 conversion and the FP32 ownership copy dominate. Loader CPU was 3.18 s across the two processes. |
-| Primary, 6 prefills | 328.87 MiB | `tensor.New` 208.51 MiB, GEMM staging 53.60 MiB, SwiGLU 108.33 MiB including 54.86 MiB in sigmoid staging. |
-| Primary, 42 decode steps | 409.21 MiB | `tensor.New` 222.42 MiB, GEMM staging 83.05 MiB including worker overhead, SwiGLU 123.81 MiB, `Session.commit` 63.03 MiB including classifier and caller-owned logit copy. |
-| Sustained, 64 decode steps | 635.18 MiB | `tensor.New` 343.05 MiB, GEMM staging 131.94 MiB including worker overhead, SwiGLU 190.36 MiB, `Session.commit` 95.53 MiB including classifier and caller-owned logit copy. |
-| Supplemental, 3 prefills | 807.84 MiB | `tensor.New` 527.23 MiB, GEMM staging 127.23 MiB, SwiGLU 261.00 MiB including 130.50 MiB of sigmoid adapter allocations. |
+Gate/up and down together accounted for 1.48 of the 1.63 s at 28 tokens and 3.34 of the 3.90 s at 29 tokens. Primary load used 1.95 sampled CPU seconds and 2.910 elapsed seconds in its profiling process. Manifest verification was 0.96 sampled and 1.010 elapsed seconds in that process. Across six primary generations, first greedy selection took 0.614 ms in total, and decode greedy selection took 4.328 ms in total. Across both 32-step sustained iterations, decode greedy selection took 6.622 ms. Both selection phases were below CPU sampling resolution.
 
-Across the sustained thread sweep, the timed allocation count went from 126,624 at P=1 to 149,739 at P=8. The single-row worker dispatch accounted for an estimated 58,737 objects (23.91%) and 3.82 MiB (0.6%) in the sustained decode allocation profile. It creates call-owned worker closures and a wait group. This identifies a material source of the allocation-count tradeoff for Pass 5 parallelism. Remaining downstream attribution includes `Tensor.Float32Values` copies, `matrix.FromSlice`, and `Matrix.Values` under sigmoid. `Decoder.NewSession` retains bounded K/V capacity and reusable attention-score scratch per session. KV payload is 851,968 bytes for the primary workload and 2,490,368 bytes for sustained decode. Model loading retains 4,943,257,600 bytes of weights, including one shared embedding/classifier tensor. RSS is a process high-water mark. In the labeled 29-token prefill, memory zeroing sampled 0.63 s (5.1%) against 10.81 s of projection kernel self time. GC marking was below the displayed threshold in the phase profiles. Zeroing and copying were visible, with a smaller elapsed opportunity than projection. The wall timings bound independent Llama work. Preserve storage semantics and treat staging, sigmoid, loader ownership, and allocation count as separate candidates.
+A timing-only overlay measured wall inside the normal Llama `project` calls, including product staging and dispatch. Three rounds ran in separate processes.
 
-### Representative shapes and experiments
+| Actual Llama projections | Median wall (range) |
+| --- | ---: |
+| Primary prefill, M=6 blocks | 0.147 s (0.145–0.152) |
+| Primary prefill, M=1 classifier | 0.015 s (0.014–0.017) |
+| 27-token prefill, M=27 blocks | 0.576 s (0.550–1.633) |
+| 28-token prefill, M=28 blocks | 1.505 s (1.495–2.372) |
+| 29-token prefill, M=29 blocks | 2.413 s (2.410–2.709) |
+| Sustained decode, M=1 blocks across 32 steps | 1.958 s (1.950–1.969) |
+| Sustained decode, M=1 classifier across 32 steps | 0.463 s (0.452–0.483) |
+| Sustained decode, all projections across 32 steps | 2.432 s (2.402–2.442) |
 
-The matrices are left `[M,K]`, stored weights `[N,K]`, and output `[M,N]`. The model has 16 blocks, 32 query heads, 8 KV heads, head width 64, hidden width 2048, FFN width 8192, vocabulary 128256, and tied embeddings.
+The median of round-by-round block projection differences was +0.945 s for 28 versus 27 tokens (−0.128 to +1.795 s, two of three positive) and +1.834 s for 29 versus 27 tokens (+1.076 to +1.863 s, all three positive). Each comparison includes the same number of groups and the rest of the public projection work. The CPU profile attributes the scalar loop directly. The wall differences estimate its cost from whole block projection timings and include scheduling variance.
 
-| Site | K | N | FP32 weights per call | Calls per phase iteration or decode step |
-| --- | ---: | ---: | ---: | ---: |
-| Attention K and V | 2048 | 512 | 4 MiB | 32 |
-| Attention Q and O | 2048 | 2048 | 16 MiB | 32 |
-| FFN gate and up | 2048 | 8192 | 64 MiB | 32 |
-| FFN down | 8192 | 2048 | 64 MiB | 16 |
-| Tied classifier | 2048 | 128256 | 1002 MiB | 1 |
+A separate diagnostic benchmark rotated actual checkpoint weights through the public GEMM API and reused its destination. Below are ranges across two P=8 sweeps, in ms per projection. M=2 exposes the scalar path with zero complete groups. M=4 and M=5 add a remainder to the same one group as M=3.
 
-M is six or 29 for the cached block projections and one for the cached classifier. The full-prefix `Forward` path applies the classifier to every row. Include its multi-row case as a regression and performance guard.
-
-The following is the existing public `GemmInto` with preallocated operands/destination and the real checkpoint weights, over three fresh processes with 125 ms minimum per subbenchmark. Reuse repeatedly applies one weight tensor. Rotate cycles through the model's disjoint block weights per shape, covering 128 MiB, 512 MiB, 2 GiB and 1 GiB, respectively. The classifier has one weight tensor. Times are median ms/op and parenthesized ranges. M4−M3 and M5−M3 are paired differences within each process. They estimate the additional cost of one or two scalar rows, including the incremental staging and output work. M2 directly exercises two scalar rows without a group. Standalone M1 follows the tuned single-row dispatch.
-
-| Site | M3 reuse | M3 rotate | M6 rotate | M4−M3 rotate | M5−M3 rotate | M2 rotate |
+| Shape | M=1 | M=2 | M=3 | M=4 | M=5 | M=6 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| K/V | 0.283 (0.282–0.285) | 0.317 (0.313–0.318) | 0.597 (0.596–0.659) | 0.991 (0.987–0.992) | 1.974 (1.972–2.166) | 1.976 (1.974–1.985) |
-| Q/O | 1.151 (1.144–1.173) | 1.260 (1.256–1.265) | 2.498 (2.476–2.560) | 3.953 (3.952–4.008) | 7.935 (7.901–7.990) | 7.970 (7.891–8.037) |
-| Gate/up | 4.931 (4.901–4.931) | 5.020 (5.019–5.035) | 10.036 (10.018–10.088) | 15.930 (15.889–15.930) | 31.635 (31.580–31.640) | 31.614 (31.585–31.647) |
-| Down | 4.563 (4.557–4.628) | 4.639 (4.629–4.747) | 9.244 (9.229–9.245) | 16.266 (16.223–16.440) | 32.503 (32.419–33.341) | 32.586 (32.505–32.678) |
+| Attention K/V | 0.161–0.182 | 1.980–1.982 | 0.114–0.117 | 1.114–1.128 | 2.106–2.112 | 0.185–0.186 |
+| Attention Q/O | 0.300–0.488 | 7.922–7.948 | 0.326–0.331 | 4.323–4.334 | 8.282–8.302 | 0.580–0.601 |
+| FFN gate/up | 1.047–4.254 | 31.701–31.865 | 1.187–1.201 | 17.044–17.051 | 32.888–32.962 | 2.344–2.375 |
+| FFN down | 1.058–2.721 | 32.755–33.239 | 1.095–1.208 | 17.472–17.516 | 33.829–33.871 | 2.139–2.178 |
+| Classifier, one tied weight reused | 14.342–20.623 | — | — | — | — | — |
 
-The M=1 classifier reused its single tensor at 17.806 ms/op (14.222–21.495). Public M=6 products used three allocations and 12,384, 49,248, 196,704 and 49,248 B/op, respectively. M=1 rotating attention K/V and Q/O medians were 0.161 and 0.320 ms. Rotating M=1 FFN results varied from 1.006–3.232 ms for gate/up and 0.919–2.522 ms for down. Use the sustained end-to-end test to assess decode.
+In the FFN cases M4−M3 was 15.84–16.38 ms and M5−M3 was 31.70–32.73 ms. At P=1, M=1 took 5.364 ms for gate/up and 4.755 ms for down. M4−M3 was 15.83 and 16.37 ms respectively, showing room to evaluate tiling even before introducing parallel dispatch. With P=4, M4−M3 was 15.88 ms for gate/up and 16.39 ms for down. These are comparisons among existing paths, using synthetic activations and checkpoint weights. Wall differences and CPU profiles in the real model establish workload relevance. Candidate end-to-end gains remain to be measured.
 
-On Go 1.27.3 arm64, the sampled full-tile inner loop contains seven scalar FP32 loads per contraction index (four weights and three activations), twelve scalar `FMADDS` instructions on independent ordered accumulator chains, and increment, compare and branch. The compiler keeps all twelve accumulators in FP registers with no inner-loop spills. The twelve raw output writes occur after the contraction. At K=2048/8192, output stores and outer tile setup are infrequent. The rotating M=3 FFN tests were about 2% slower than reuse. One caller processed logical weight payload at about 13–14 GB/s on those shapes. Three trials of independent existing M=6 gate/up calls, rotating through real weights with one caller per scheduler thread and disjoint destinations, showed aggregate payload rates of 6.4–12.4 GB/s at P=1, 24.9–25.2 at P=2, 45.9–46.5 at P=4, and 67.3–68.2 at P=8. The P=1 trials were noisy. This experiment demonstrates headroom beyond one core in the current serial three-row loop. It measures independent products and logical weight visits, and gives no direct measure of one parallel call, DRAM transactions, or cache misses. The strongest diagnosis is serial inner-loop throughput, with load and fused arithmetic both material. Distinguishing load stalls from FP issue limits or cache effects requires hardware counters or controlled measurements. A wider tile needs its own evidence.
+### Allocation traffic
 
-## Ownership and exact call path
+Allocation profiles ran in separate processes at 64 KiB sampling. Rows use sampled cumulative bytes attributed by call stack. GEMM includes dispatch and the staged product. Projection includes GEMM plus the Llama destination and shape work. SwiGLU includes sigmoid. Benchmark B/op and allocs/op above use the benchmark's direct counters.
 
-The reusable implementation belongs in neuralnetwork. Llama builds shape-checked, private tensors and sends each projection through a public GEMM API. Neuralnetwork owns the row-major weight slices, the validation boundary, the host dispatch, and the arithmetic. This change can use the existing API.
+| Scope | Phase total MiB | Llama projection MiB | GEMM MiB | SwiGLU MiB | Sigmoid staging MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Primary prefill ×6 | 334.48 | 112.87 | 56.93 | 107.74 | 53.28 |
+| Primary short decode, 42 steps | 410.44 | 166.93 | 84.53 | 126.48 | 63.68 |
+| Sustained decode, 64 steps | 623.64 | 251.41 | 127.17 | 189.43 | 95.41 |
+| Prefill 27 ×3 | 747.69 | 235.81 | 118.19 | 243.00 | 121.50 |
+| Prefill 28 ×3 | 774.57 | 244.77 | 122.52 | 252.00 | 126.00 |
+| Prefill 29 ×3 | 810.50 | 255.59 | 127.24 | 261.00 | 130.50 |
 
-1. Llama `generation.go:Decoder.GenerateGreedyCached` calls `session.go:Session.Prefill`. The primary benchmark exercises the same session path directly. Prefill calls `decoder.go:Decoder.forwardPrefix` and `Decoder.forwardBlock`. Q, K and V call `attention.go:headProjection` and then `project`. O, FFN gate, up and down call `project` directly. `Session.Prefill` gathers the last hidden row and calls `Session.commit` → `Decoder.projectLogits` → `project`. `weights.go:Decoder.loadWeights` ties the classifier to the embedding.
-2. Llama `tensor_ops.go:project` calls `tensor.GemmShape`, allocates a disjoint FP32 tensor with `tensor.New`, and calls `tensor.GemmInto(input, weight, nil, out, tensor.GemmConfig{TransposeB: true, Alpha: 1})`. `Session.Decode` reaches the same projections with M=1. Uncached `Decoder.Forward` and `ForwardWithTrace` use the full-prefix path and project all final rows.
-3. Neuralnetwork `tensor/gemm.go:GemmInto` validates the operands, shapes, optional bias, destination storage and aliasing. In default and purego builds, `tensor/matrix_product_host.go:matrixProductValues` allocates call-owned staging and calls `matrixProductInto` → `internal/float32product/product.go:RightTranspose`. The kernel writes the staged result. GEMM then applies Alpha and optional Beta/bias in its existing order and copies to the public destination. The platform-specific Metal configuration uses `tensor/matrix_product.go` → `matrix.Matrix.MatMulRightTransposeInto`, through a separate adapter.
-4. Host `RightTranspose` handles empty contractions first. For M=1 and N≥4 it selects `rightTransposeOneRow` or `right_transpose_parallel.go:rightTransposeOneRowParallel`. For M≥3 it walks complete groups serially, invoking `rightTransposeThreeRows` once per group. It then computes each remaining row with the scalar loop local to `RightTranspose`. That loop also handles M=2 directly. The three-row kernel tiles four output columns and has its own scalar-column cleanup when N is not a multiple of four.
+The scalar remainder loop shows zero separate allocation traffic. The larger M shapes allocate larger outputs and activations. For the 29-token process, complete-group coordination sampled 0.375 MiB and roughly 3,074 objects across three iterations. In the sustained profile, the standalone one-row dispatch sampled 4.065 MiB of coordination allocation. In the primary process `LoadHFModel` attributed 9,758.67 MiB out of 10,652.86 MiB of cumulative allocations (91.61%). `ReadFloat32` accounted for 4,723.82 MiB and the ownership copy in `tensor.FromFloat32` for 4,714.59 MiB. A separate P=8 diagnostic forced GC immediately after loading with the decoder live and observed 4,943,540,048 bytes (4.604 GiB) of live Go heap. Primary process peak RSS was 6.374 GiB at the median. These are separate measures of allocation traffic, live objects, and process peak.
 
-## Desired behavior and implementation direction
+The Pass 6 release measured 19.6% and 37.3% labeled prefill CPU in the one- and two-row remainders, on different runs. The CPU table reports fresh Pass 7 samples. Its lower percentages reflect the measured phase totals, which include CPU consumed in parallel groups. Both passes found a substantial serial cost at 29 rows.
 
-Parallelize sufficiently large complete-group work in a host right-transposed product while preserving all output bits and the public contract. Use the following hypothesis, then select a worker cap and threshold from data.
+## Repository Ownership
 
-1. Test splitting contiguous right-hand rows and the corresponding output columns across a bounded number of workers. Align full ranges to the existing four-column tile. Each worker should cover its range across the complete groups in the call, with the original destination row stride and exclusive output columns for each row. Preserve the original handling of an incomplete output-column tile. Reuse the ordered tile arithmetic and existing worker conventions where they fit. Joining once per GEMM gives one coordination cost across the complete groups. Retain the serial path for small calls and P=1.
-2. Estimate eligibility from weight footprint and number of complete groups. Sweep P=1, 2, 4 and 8, and quantify thresholds for 4, 16 and 64 MiB weights, groups at M=3/M=6/M=27, and the uncached classifier. The Pass 5 one-row implementation's 2 MiB-per-worker heuristic is a comparison point. Cost per worker and thread contention may differ for the three-row kernel.
-3. Keep the existing one- and two-row scalar remainder handling and the Pass 5 M=1 kernel as independent paths. Track three-row CPU, projection wall and remainder behavior so a speedup on M=29 can be attributed to the intended groups, even when the remainder becomes a larger percentage. Preserve Metal dispatch.
+Neuralnetwork owns dispatch, the contraction loops, and validated FP32 storage. Llama supplies whole tensors and the same public GEMM operation for block and classifier projections. A reusable remainder fix belongs in `internal/float32product`. It can reach existing tensor and pure matrix callers through their current adapters.
 
-### Alternatives considered
+## Exact Call Path
 
-- **Retune the 3×4 tile or vectorize independent outputs.** The loop already reuses activations and weights with twelve independent accumulators and no inner-loop spills. Extra chains or different loads need controlled evidence for execution throughput and register pressure. Evaluate only if the bounded parallel approach fails its completion criteria. Preserve each output's ascending contraction and fused behavior.
-- **Shard by complete three-row groups.** Workers would independently read the full right matrix. This may be simpler for contiguous writes, but shares parallelism across at most two groups on the primary workload and duplicates the concurrent weight streams. Compare against output-column sharding if the worker topology proves significant. Select a single approach.
-- **Accelerate the scalar remainder.** It accounts for 33.5% of supplemental prefill CPU and is a separate opportunity. Six-row prefill has zero scalar remainder.
-- **Continue improving M=1 decode.** It still dominates decode CPU. In a fresh one-trial-per-setting diagnostic, sustained decode delivered 2.96, 4.67, 9.94 and 12.52 tokens/s at P=1, 2, 4 and 8. Its logical payload rate is already close to the aggregate rotating FFN experiment, and the remaining memory, scheduling and per-core headroom needs separate evidence. The serial complete-group path has demonstrated multicore headroom and directly affects TTFT.
-- **GEMM staging, sigmoid or checkpoint loading.** These are visible in allocations and peak-memory behavior, with independent ownership and lifetime concerns. Improving them addresses a different part of the workload.
+1. Llama `session.go` runs `(*Session).Prefill` → `(*Decoder).forwardPrefix` → `(*Decoder).forwardBlock` in `decoder.go`. `attention.go:headProjection` calls `project` for Q, K, and V before reshaping for heads. The attention output, FFN gate, up, and down projections call `project` directly from `forwardBlock`. Session prefill gathers the last hidden row and `session.go:(*Session).commit` calls `decoder.go:(*Decoder).projectLogits` for the classifier.
+2. `session.go:(*Session).Decode` passes one row through `forwardBlock` and uses the same `commit` classifier. `decoder.go:(*Decoder).Forward` goes through `forwardPrefix` and `projectLogits` for full-prefix logits. Its classifier can receive multiple rows.
+3. `tensor_ops.go:project` calls `tensor.GemmShape`, allocates the FP32 destination with `tensor.New`, then calls `tensor.GemmInto(input, weight, nil, out, config)` with `TransposeB: true, Alpha: 1`.
+4. In `github.com/itsmontoya/neuralnetwork/tensor`, `gemm.go:GemmInto` validates dtype, shape, aliasing, and bias. The default/purego implementation in `matrix_product_host.go` calls `matrixProductValues` → `matrixProductInto` → `float32product.RightTranspose`. It stages FP32 products and `GemmInto` applies coefficients and copies into the caller destination. The separate Metal-tagged adapter in `matrix_product.go` routes through `matrix.(*Matrix).MatMulRightTransposeInto`. The host fallback `matrix/matmul_pure.go:matMulRightTransposeIntoPure` also calls `float32product.RightTranspose`.
 
-## Numerical, allocation and ownership contracts
+## Current Behavior
 
-- Preserve ascending K, initial FP32 zero, and the same effective FP32 rounding and fusion in each build. Go 1.27.3 arm64 emits `FMADDS`. Require bitwise equality to the v0.10.15 path for finite outputs within the same build and architecture, including signed zero. Cover NaN and Inf behavior under existing test expectations. Preserve empty contractions, output tails, Alpha, Beta, bias order and all existing tolerances. Use disjoint output partitions of complete dot products. Splitting K changes the accumulation order.
-- Retain public GEMM shape and dtype validation, input/destination/bias disjointness, and destination immutability on returned errors. The raw kernel overwrites dirty output, and inputs remain private and read-only. Keep staging and coordination call-owned, join all work before returning, and release references at completion. Preserve independently retained session logits, trace tensors, and retry semantics. A single `Session` is caller-synchronized, and many sessions and forwards can share one decoder.
-- The existing serial raw three-row kernel allocates zero bytes. The public path allocates its current staging and shape objects. Any parallel coordination allocations should be bounded by participating workers per call and measured separately. Avoid per-row-group allocations, weight duplication, shared mutable scratch and global kernel state. Document measured B/op, allocs/op, RSS and concurrent caller impact, including a one-thread and small-work guard.
+In `internal/float32product/product.go`, `RightTranspose` returns on empty output, clears for zero contraction width, and dispatches a standalone row with `N >= 4` via `dispatchRightTransposeOneRow`. Other nonempty shapes go through `dispatchRightTransposeRows`. It calls `dispatchRightTransposeGroups` for `M/3` complete groups and then `rightTransposeScalarRows` for any remaining rows. `rightTransposeScalarRow` traverses each output column and uses `scalarDotProduct` in ascending K. At `M=2` there is no complete group, so both rows take this loop. For `M=28/29` the group workers have already joined before the scalar loop starts.
 
-## Neuralnetwork microbenchmarks and tests
+In `right_transpose_parallel.go`, group workers shard complete four-column tiles with stride N. One worker runs on the caller, consumes the column tail, and joins the other workers before returning. The group worker cap is eight, limited by `GOMAXPROCS`, tile count, and a budget of 1 MiB of logical FP32 weight visits per worker. Standalone M=1 uses its own four-column tiling and 2 MiB per-worker budget with the same cap. Its serial and parallel kernels remain available to evaluate for a one-row remainder.
 
-Build the baseline from `v0.10.15` and the candidate from its implementation commit, in separate neuralnetwork worktrees if helpful. Run the existing `tensor/right_transpose_benchmark_test.go:BenchmarkRightTranspose` under the pinned Go environment. Record build metadata, repeat each measurement in fresh processes, and alternate before/after order.
+## Desired Behavior
 
-```sh
-export GOTOOLCHAIN=go1.27.3 GOARM64=v8.0 GOMAXPROCS=8 CGO_ENABLED=1 GOFLAGS= GOWORK=off
-nn_out=$(mktemp -d "${TMPDIR:-/tmp}/neuralnetwork-pass6.XXXXXXXX")
-go test -mod=readonly -c -o "$nn_out/nn.test" ./tensor
-go version -m "$nn_out/nn.test"
-"$nn_out/nn.test" -test.run '^$' -test.bench '^BenchmarkRightTranspose$' -test.benchtime 200ms -test.benchmem
-```
+Use ordered host kernels for the remainder and enough parallel work to materially lower 28- and 29-token Llama prefill latency. Preserve the dispatch performance at M=1, M=3, M=6, and M=27, including the repeated calls at those sizes in the primary, sustained, and concurrent benchmarks. Retain a serial path for low work or one scheduler thread.
 
-Extend raw `float32product.RightTranspose` and public `tensor.GemmInto` benchmarks using the K/N pairs above. Measure M=1–6 and M=27, 28, 29 and 30, with focused subsets for the large vocabulary costs. Include M=3 and M=6 for all shapes. Record the remainder-only M=2 and paired M4−M3 and M5−M3 differences, alongside full projection time. Use repeated and rotating weight operands, with disjoint sets larger than cache and a documented logical-byte definition. Allocate operands and destinations outside the timed loop. Test divisibility, dimensions near the worker threshold, N=0–5 and N=513 or N=8193, and short/odd K. Sweep P and worker caps. Repeat with parallel callers sharing weights and disjoint destinations, and profile scheduling overhead and allocation changes. Compare raw versus public cost and report the range over at least three pairs.
+## Proposed Implementation Direction
 
-Keep `internal/float32product` tests `TestRightTranspose`, `TestRightTransposeConcurrent`, `TestRightTransposeNonfiniteAndSignedZero`, and `TestEmptyContraction` green. Preserve public tensor product reference coverage and `Test_Products_AliasesAndEmptyContractions`, `Test_Gemm_BiasValidation`, `Test_Gemm_RightTranspose`, and `Test_Gemm_RightTransposeSingleRowConcurrentRetry`. Add regression coverage exercising the actual parallel path against an ordered serial reference with K=2048 and 8192, irregular split and output-column tails, odd K, mixed group/remainder cases, cancellation, dirty destinations, shared immutable weights and concurrent exclusive destinations. Include fallback at P=1. Verify alias errors, independently retained results and clean retries in the public API. Run:
+Start by benchmarking reuse of the existing tiled single-row kernel on the one-row remainder slices. Measure both its serial path and cost-gated sharding. For two rows, compare two existing single-row computations against a two-row tile that reuses weight loads across both rows. Compare a single sharded dispatch handling both rows against two dispatches. For mixed group/remainder calls, also measure handling all rows within one existing output-column shard and joining once. Keep each output in its original column and row stride, and handle an incomplete column tile. Select the simplest variant with a stable gain in kernel, public GEMM, and real Llama measurements.
+
+## Alternatives Considered
+
+- **Single-row decode dispatch and bandwidth.** Standalone block and classifier kernels account for 89.5% of fresh sustained decode CPU, and condition signaling accounts for 1.37 s (9.7%). Three alternating real decode comparisons at P=4 and P=8 reached 9.898 versus 11.28, 7.809 versus 9.239, and 9.922 versus 12.61 tokens/s. Reducing P to four decreased throughput by a median paired 15.5% (12.3–21.3%). This global scheduler sweep leaves room for per-shape tuning, but offers less direct evidence for a change than the measured gap between scalar and tiled paths.
+- **Checkpoint staging.** A fresh process spends a median 1.859 s inside `LoadHFModel`. The cumulative allocation is dominated by conversion and copying into private tensor storage. The recurring prefill cost now has a smaller reusable implementation scope. Eliminating the loader-to-tensor copy would require an ownership-preserving API or independent evidence for a safe loader-local change.
+- **SwiGLU temporaries.** Sigmoid staging accounts for about half of sampled SwiGLU bytes in sustained decode and 29-token prefill. The 29-token profile sampled 0.39 s (3.3%) in zeroing across all prefill stacks, and sustained decode sampled 0.09 s (0.6%). Reduced allocation traffic may help live memory and GC. These runs give stronger evidence for elapsed latency in the scalar remainder.
+- **Remainder implementation choices.** Reusing the standalone M=1 kernel is the smallest experiment. A tiled two-row path could share weight loads. Fusing group and remainder dispatch could avoid a second worker launch. Padding M to a multiple of three would increase arithmetic and staged output size. Measure per-call overhead and independent sessions before choosing among those approaches.
+
+## Numerical Correctness
+
+Preserve one FP32 accumulator initialized to positive zero per output, ascending K, and the effective rounding and FMA behavior of the same Go build and architecture. Go 1.27.3 arm64 disassembly shows `FMADDS` in the current scalar remainder, one-row, and three-row loops. Partition full dot products by output columns or rows and preserve coefficient, bias, and copy order. Require bitwise parity with the ordered v0.10.16 path for finite inputs and signed zero within each build configuration. Match existing NaN/Inf expectations. Keep the pinned Llama tolerances, winners, and logit digests.
+
+## Ownership and Lifetime
+
+The raw kernel reads immutable left and right storage, overwrites every output element even if its prior value was dirty, and retains no buffers. Public GEMM validates all aliases and operands and leaves a disjoint destination unchanged on any returned error. Keep the product workspace call-owned, preserve output staging and error/retry behavior, and finish every write before releasing a workspace. Llama's callers may retain returned logits or trace tensors across steps. An unsuccessful step leaves the session position uncommitted, and the next attempt overwrites any provisional cache data before it becomes visible.
+
+## Concurrency
+
+Independent sessions may share one decoder and its read-only weights. Give each invocation its own destination and scratch. Bound workers by the current scheduler budget and the amount of work, test concurrent invocations and the P=1 fallback, and let the caller compute one shard. Workers must terminate and release references before the operation returns. The current API is synchronous and has no cancellation parameter. Preserve that lifecycle so application-level cancellation or error cannot leave workers using released buffers.
+
+## Allocation and Memory
+
+The raw scalar remainder allocates no payload or coordination objects. Preserve the existing GEMM staging and destination semantics. Bound any new coordination by participating workers and measure it separately from payloads, using raw B/op, public B/op, real prefill B/op, and alloc_objects. Avoid per-row or per-tile allocations and additional output clearing or weight copies. Quantify zeroing and coordination CPU and compare peak RSS in independent sessions sharing weights. Inspect the full working set and releases before considering any persistent buffer.
+
+## Representative Shapes
+
+A projection uses input `[M,K]`, checkpoint weight `[N,K]`, and output `[M,N]`. The pinned model has 16 layers, hidden width 2048, intermediate width 8192, 32 query heads, eight KV heads, head width 64, and 128256 tied embedding/classifier rows.
+
+| Projection | K | N | Calls per layer or session step |
+| --- | ---: | ---: | --- |
+| Q and attention output | 2048 | 2048 | Two per layer |
+| K and V | 2048 | 512 | Two per layer |
+| Gate and up | 2048 | 8192 | Two per layer |
+| Down | 8192 | 2048 | One per layer |
+| Tied classifier | 2048 | 128256 | Once per session step, M=1 |
+
+Use M=3/4/5 for one complete group plus zero/one/two rows, M=6 for two complete groups, and M=27/28/29 for nine complete groups plus zero/one/two rows. Include M=1 and M=2 as standalone controls. M=30 is the next complete-group guard at the long-prompt scale. For the classifier focus on M=1 and include a small mixed-M check for full-prefix callers.
+
+## Benchmark Plan
+
+- Extend the existing `tensor/right_transpose_benchmark_test.go:BenchmarkRightTranspose` and `tensor/right_transpose_groups_benchmark_test.go:BenchmarkRightTransposeGroups` coverage for raw `float32product.RightTranspose` and public `tensor.GemmInto`. Allocate operands and destinations outside the timed loop. Use each block K/N pair, repeated weights and rotating weights larger than cache. Record raw and public times, exact memory per operation, and logical weight visits separately.
+- Measure standalone M=2 and matched M4−M3 and M5−M3 deltas at the same K/N/P. Include 27/28/29 and compare complete groups, remainder contributions, and whole-call overhead. Use P=1/2/4/8, widths around dispatch thresholds, N=0–5, N=513/8193, and short or odd K. Exercise parallel calls with shared weights and disjoint outputs.
+- Build clean baseline/candidate binaries using Go 1.27.3 and the same GOARM64, CGO, and tags. Alternate within pairs in fresh processes. Report medians, ranges, paired deltas and improvement counts, sample projection and scheduler CPU, and track allocations. Test the resulting immutable candidate in Llama before claiming an end-to-end gain.
+
+## Correctness Plan
+
+Run upstream `TestRightTranspose`, `TestRightTransposeConcurrent`, `TestRightTransposeNonfiniteAndSignedZero`, `TestEmptyContraction`, `TestRightTransposeGroupWorkerCount`, `TestRightTransposeGroupsAgainstOrderedReference`, `TestRightTransposeOneRowWorkerCount`, and `TestRightTransposeOneRowAgainstOrderedReference`. Keep tensor `Test_Products_AliasesAndEmptyContractions`, `Test_Gemm_BiasValidation`, `Test_Gemm_RightTranspose`, `Test_Gemm_RightTransposeGroupsConcurrentRetry`, and `Test_Gemm_RightTransposeSingleRowConcurrentRetry` green. Keep matrix `Test_MatMulRightTransposeInto_AscendingOrder` green.
+
+Add coverage that triggers the remainder path and compares every value with an ordered baseline. Include M=2/4/5/28/29, complete groups alone, serial fallback, threshold and cap behavior, odd K, small and non-multiple-of-four N, dirty output, shared read-only weights, and independent destinations. Verify completeness after workers join, deterministic output across worker counts, alias errors, destination retention, and valid retries. Run the upstream default, purego, and race suites and vet. On supported Darwin/arm64, verify the Metal matrix and tensor routes with the Metal toolchain.
 
 ```sh
 go test -mod=readonly ./...
 CGO_ENABLED=0 go test -mod=readonly -tags=purego ./...
 go test -mod=readonly -race ./...
 go vet -mod=readonly ./...
-# On Darwin/arm64 with the Metal toolchain:
 go test -mod=readonly -tags=metal ./tensor ./matrix
 ```
 
-## Llama validation
+## Performance Acceptance Criteria
 
-Use Llama `cd74e6d` for both builds. Download and verify the pinned Meta snapshot and TinyStories model/tokenizer using `testdata/README.md`. The frozen Transformers comparisons use `atol=rtol=1e-3`, and cached versus full-prefix uses `atol=rtol=1e-4` over the complete logits. Keep greedy winners, reference continuation IDs, and decoded bytes identical. Preserve the supplemental and sustained FP32 hashes in the same build and architecture. The benchmark reproduction for Pass 5 remains available at `git show cd74e6d:NEURALNETWORK_OPTIMIZATION_HANDOFF.md`.
+On paired real Llama measurements at P=8, target at least 15% lower median elapsed prefill at 28 tokens and 25% at 29 tokens, with improvement in at least four of five pairs at each size. Use the fresh runs as context and collect a new same-session baseline alongside the candidate. Verify lower elapsed time and less scalar remainder work for the FFN shapes. An improvement should persist with rotating weights and through public GEMM.
 
-From the Llama root, use temporary module files containing the same Llama baseline and only the verified neuralnetwork candidate dependency change. Confirm both build records contain Go 1.27.3, the pinned expected dependency version and checksum, and the same tags and platform. Use an immutable candidate tag or Go pseudo-version. Alternate order inside pairs and keep the model snapshot, hardware, timer and profile settings fixed.
+At 27 tokens, primary TTFT and cached generation, sustained decode, and the two-session guard, investigate any repeatable median regression above 5%. Include a P=1 guard and investigate a repeatable small-shape penalty. Increase repeats when ranges or paired directions leave the result inconclusive. Keep new allocation traffic below 1% of the corresponding prefill B/op, with bounded coordination objects and no material repeatable RSS increase. Gate acceptance on the Llama timings and correctness checks.
+
+## Commit Discipline
+
+Use small descriptive commits with one purpose each. Separate independent benchmark or test infrastructure from the implementation when each can be reviewed alone. Put regression tests with the change when they are needed to review its behavior together. Keep a single versionable candidate containing all required code and tests.
+
+## Completion Criteria
+
+An immutable candidate has the targeted remainder change, upstream correctness and concurrency coverage, paired raw and public results, and a report showing it meets the acceptance criteria. Supply evidence for every regression guard and identify any outstanding measurements so Llama can verify them before integration.
+
+## Return Contract
+
+Return the exact commit hashes and purpose of each, the published tag and module checksum or immutable pseudo-version, toolchain and build settings, test commands and outcomes, bitwise and nonfinite validation, raw benchmark observations with paired summaries, and CPU/allocation profiles. Include the dependency integration command and any relevant backend or configuration details. State which Llama acceptance runs were performed and supply their raw results.
+
+## Llama Validation
+
+Use Llama `5fb56f5bd22ec0f8157b3664fd2ef0d914dbd785` for both builds and verified fixtures from `testdata/README.md`. Compare `v0.10.16` to the immutable upstream candidate by changing only the dependency in temporary Go module files. Run commands from the Llama source root so the tests resolve `testdata`.
 
 ```sh
 export GOTOOLCHAIN=go1.27.3 GOARM64=v8.0 GOMAXPROCS=8 CGO_ENABLED=1 GOFLAGS= GOWORK=off
 export LLAMA_32_1B_MODEL_DIR=/path/to/verified/4e20de362430cd3b72f300e6b0f18e50e7166e08
 export LLAMA_STORIES260K_MODEL=/path/to/stories260K.bin
 export LLAMA_STORIES260K_TOKENIZER=/path/to/tok512.bin
-out=$(mktemp -d "${TMPDIR:-/tmp}/llama-pass6.XXXXXXXX")
-cp go.mod "$out/before.mod"
-cp go.sum "$out/before.sum"
-cp go.mod "$out/after.mod"
-cp go.sum "$out/after.sum"
+out=$(mktemp -d "${TMPDIR:-/tmp}/llama-pass7-compare.XXXXXXXX")
+for build in before after; do
+    cp go.mod "$out/$build.mod"
+    cp go.sum "$out/$build.sum"
+done
 candidate=SET_VERIFIED_TAG_OR_PSEUDOVERSION
 go get -modfile="$out/after.mod" "github.com/itsmontoya/neuralnetwork@$candidate"
 for build in before after; do
-  go test -mod=readonly -modfile="$out/$build.mod" -c -o "$out/$build.test" .
-  go version -m "$out/$build.test" > "$out/$build.build.txt"
+    go test -mod=readonly -modfile="$out/$build.mod" -c -o "$out/$build.test" .
+    go version -m "$out/$build.test"
+    go test -mod=readonly -modfile="$out/$build.mod" -count=1 -p 1 ./...
+    CGO_ENABLED=0 go test -mod=readonly -modfile="$out/$build.mod" -tags=purego -count=1 -p 1 ./...
+    env -u LLAMA_32_1B_MODEL_DIR go test -mod=readonly -modfile="$out/$build.mod" -race -count=1 ./...
+    go vet -mod=readonly -modfile="$out/$build.mod" ./...
 done
 ```
 
-Run seven pairs for `CachedGeneration` and at least three pairs each for `SupplementalPrefill` and `SustainedDecode`. Run from the Llama source directory to resolve `testdata`. For Darwin, the wrapper below records process wall time and peak RSS bytes using the same monotonic clock and one-process `wait4` method. Elsewhere, document OS-specific RSS units and record them consistently.
+Check `TestLlama32Logits` (Transformers, `atol=rtol=1e-3`), `TestLlama32CachedParity` (complete logits, `atol=rtol=1e-4`), and `cmd/generate:TestLlama32Generation` (frozen continuation and byte-identical cached/full-prefix stdout). Check TinyStories logits and output, synthetic MHA/GQA/MQA traces, retained outputs, failed-step retries, and shared-decoder sessions. Run the default and purego fixture suites with the pinned Meta fixture. The race invocation above covers local fixtures and TinyStories without the large opt-in Meta fixture.
 
-```python
-# Save as $out/measure.py
-import os
-import sys
-import time
+Require the following SHA-256 hashes of little-endian FP32 logit bits. The diagnostics already produced these on the fresh pass.
 
-path, *command = sys.argv[1:]
-with open(path, "wb", buffering=0) as log:
-    start = time.perf_counter()
-    pid = os.posix_spawn(command[0], command, os.environ, file_actions=[
-        (os.POSIX_SPAWN_DUP2, log.fileno(), 1),
-        (os.POSIX_SPAWN_DUP2, log.fileno(), 2),
-    ])
-    _, status, usage = os.wait4(pid, 0)
-    log.write(f"process_wall_s={time.perf_counter() - start:.6f} peak_rss_bytes={usage.ru_maxrss}\n".encode())
-sys.exit(os.waitstatus_to_exitcode(status))
-```
+| Scope | SHA-256 | Greedy winner where reported |
+| --- | --- | ---: |
+| 27-token prefill | `0b087b0839da36ec06a3a8f777d4c3c944ccc7439107fcad39b6ad0239ed9afc` | 9822 |
+| 28-token prefill | `cc93319c3c0701fd9cd3fdc2080afe43d2f82ba7cd236a698d19518836854e8c` | 374 |
+| 29-token prefill | `6ffb4dc93003480aebdd51e9f1fee47ae3836eea9fb35ce2508f5d618a9871a5` | 12366 |
+| Sustained terminal decode row | `b72d983e8b5c45f83ad858b52f1d27b87a7ad8118be6c5d315db2ea6fc6fd84a` | 1917 |
+| Two concurrent six-token prefills | `f2e070e41d1eac82f0159284cfdd0d070aa06ef703c833fa6fb781a5b7b487c1` | — |
+
+Alternate baseline/candidate order within pairs. Collect 12 primary pairs, seven sustained decode pairs, five pairs at each of 27/28/29 tokens, and at least three concurrent pairs. For each process call the relevant binary with `-test.run '^$' -test.bench '<exact benchmark regexp>' -test.benchtime 1x -test.benchmem -test.timeout 15m -test.v`. Use Python `os.posix_spawn`, monotonic `time.perf_counter`, and `os.wait4` for process wall and Darwin peak RSS in bytes. Use the tracked Llama benchmarks `BenchmarkLlama32CachedGeneration`, `BenchmarkLlama32SustainedDecode`, and `BenchmarkLlama32SupplementalPrefill` for the primary, sustained, and 29-token workload. Use the archived Llama-only diagnostic overlay for the 27/28 and concurrent cases. The overlays call the candidate's normal public GEMM entry point.
+
+Collect CPU and heap profiles for both builds in independent processes. Use six primary iterations, two sustained iterations, and three iterations per supplemental length. Use `-test.cpuprofile` with `BenchmarkLlama32Pass7Phases` and the profiling overlay to label prefill, greedy selection, loading, and both decode workloads. Use `-test.memprofile` and `-test.memprofilerate 65536` in separate processes for allocation stacks. Compare exclusive CPU for groups, remainders, standalone single-row blocks, and classifier, along with stage elapsed time. Report per-build medians and ranges, median paired differences and percentages from individual pairs, and the number of pairs that improved. Report inconclusive effects explicitly where variance prevents attribution.
+
+### Fresh baseline validation
+
+The pinned baseline passed the default and purego suites with the Meta and TinyStories fixtures, the race suite with TinyStories and local fixtures, and `go vet`. The largest Transformers tolerance fraction was 0.0316354 in each fixture build. Cached and full-prefix logits matched exactly at the checked positions. Both CLI paths matched the frozen continuation bytes in the fixture suites.
+
+### Raw evidence and replay
+
+The host archive `/private/tmp/llama-pass7-evidence.Fzf5laYk.tar.gz` contains per-trial logs, CPU and allocation profiles, symbolized output, ARM64 disassembly, and the exact diagnostic sources and scripts. The extracted directory contains `env.sh`, `measure.py`, `baseline.sh`, `profile.sh`, `analyze.sh`, and `validate.sh`. From Llama's root, source `env.sh` after updating fixture paths if needed, run both overlay preparation scripts with the repo root, and build the binaries as follows.
 
 ```sh
-set -e
-for workload in CachedGeneration SupplementalPrefill SustainedDecode; do
-  trials=3
-  if [ "$workload" = CachedGeneration ]; then trials=7; fi
-  for trial in $(seq "$trials"); do
-    order='before after'
-    if [ "$((trial % 2))" -eq 0 ]; then order='after before'; fi
-    for build in $order; do
-      python3 "$out/measure.py" "$out/$workload-$build-$trial.log" "$out/$build.test" \
-        -test.run '^$' -test.bench "^BenchmarkLlama32${workload}$" \
-        -test.benchtime 1x -test.benchmem -test.timeout 15m -test.v
-    done
-  done
-done
+evidence=/path/to/extracted/evidence
+. "$evidence/env.sh"
+python3 "$evidence/prepare-overlays.py" "$PWD"
+python3 "$evidence/prepare-pass7.py" "$PWD"
+go test -mod=readonly -c -o "$evidence/llama.test" .
+go test -mod=readonly -overlay "$evidence/overlay.json" -c -o "$evidence/diagnostic.test" .
+go test -mod=readonly -overlay "$evidence/wall-overlay.json" -c -o "$evidence/timing.test" .
+go test -mod=readonly -overlay "$evidence/pass7-overlay.json" -c -o "$evidence/phases.test" .
+sh "$evidence/baseline.sh" "$evidence"
+sh "$evidence/profile.sh" "$evidence"
+sh "$evidence/analyze.sh" "$evidence"
+sh "$evidence/validate.sh" "$evidence"
 ```
 
-Profile both builds in separate, matched processes. Use primary 3x in two processes, supplemental 3x, and sustained 2x for unmodified benchmark CPU and allocation profiles. Collect with `-test.cpuprofile`, `-test.memprofile` and `-test.memprofilerate 65536`. Use `go tool pprof -alloc_space` and `-alloc_objects` with `-focus='\(\*Session\)\.Prefill'` or `Decode` for allocation attribution. Compare `LoadHFModel` independently of inference. Time repeated `project` calls inside the actual Llama run by shape to measure elapsed kernel plus staging/dispatch cost. For CPU attribution, tag the phase around `Session.Prefill` plus greedy selection, and separately around the decode loop with `pprof.Do(ctx, pprof.Labels("phase", "prefill"), fn)` or `"decode"`. Include spawned workers. Run six primary iterations, two 32-step sustained iterations, and three iterations per 27/28/29 row case. `Decoder.NewSession` is outside the labels. For the 27/28 diagnostics, tokenize the exact supplemental prompt and pass its first 27/28 IDs. Use `go tool pprof -top -relative_percentages -tagfocus=phase=prefill` and `-list='float32product\.RightTranspose$'` to account for the complete groups, separate remainder lines and M=1 classifier. On the candidate include newly attributed worker stacks and report both sampled CPU and elapsed time. Parallel execution can increase sampled CPU while decreasing wall time.
-
-Run full fixture suites with both module files and real fixtures. This covers `TestLlama32Logits`, `TestLlama32CachedParity`, `cmd/generate:TestLlama32Generation` for byte-identical cached and uncached CLI stdout, `TestStories260KLogits`, `cmd/generate:TestStories260KGeneration`, synthetic MHA/GQA/MQA intermediate traces, retained logits and traces, failed-step retries, and concurrent decoders and sessions. The race suite can exclude the large opt-in Meta fixture while covering local models and TinyStories. Confirm both default and purego.
-
-```sh
-for build in before after; do
-  go test -mod=readonly -modfile="$out/$build.mod" -count=1 -p 1 ./...
-  CGO_ENABLED=0 go test -mod=readonly -modfile="$out/$build.mod" -tags=purego -count=1 -p 1 ./...
-  env -u LLAMA_32_1B_MODEL_DIR go test -mod=readonly -modfile="$out/$build.mod" -race -count=1 ./...
-  go vet -mod=readonly -modfile="$out/$build.mod" ./...
-done
-```
-
-### Profile evidence and replay files
-
-The fresh unmodified benchmark logs, raw pprof files, labeled diagnostic source, timing probe, disassembly and summaries are in `/private/tmp/llama-pass6-evidence.UMQziOl7.tar.gz` on the measurement host. The standard Llama benchmarks and the commands above reproduce primary, sustained and supplemental measurements independently of the archive. For the diagnostic archive, extract to a temporary directory, supply its `env.sh` with the fixture exports above, and run `python3 "$out/prepare-overlays.py" "$PWD"` from the Llama root. Build `$out/llama.test` with `go test -mod=readonly -c -o "$out/llama.test" .` before running the profile script. In the archive, `profile.sh` and `analyze.sh` take the extracted directory as their argument. Build `wall.test` with `go test -mod=readonly -overlay "$out/wall-overlay.json" -c -o "$out/wall.test" .`. Run `BenchmarkLlama32Pass6ProjectionWall/Primary`, `/Sustained` and `/Prefill29` at 1x with that binary. Run `BenchmarkLlama32Pass6Projection` with `diagnostic.test` at 125 ms and `BenchmarkLlama32Pass6IndependentFFN` with `wall.test` at 400 ms. The phase, shape and independent caller experiments were implemented as Llama-only test overlays and call the existing neuralnetwork implementation.
-
-Fresh baseline validation passed on this host with the pinned Meta and TinyStories fixtures in the default and purego suites. The race suite passed with TinyStories and local tests, with the opt-in Meta fixture disabled. `go vet -mod=readonly ./...` passed.
-
-## Commit discipline and completion criteria
-
-- Produce small, concise, logical commits. Group the performance implementation with its atomic regression coverage. Separate meaningful benchmark infrastructure or measured documentation when useful. Inspect the final diff and history.
-- Show a repeatable improvement on complete three-row groups and on Llama's paired six-token prefill/TTFT, with ranges and raw observations. Report the effect on overall generation, throughput, bytes/op, allocs/op, whole-process wall and peak RSS. Use the 27/28/29 row series and source profiles to explain the supplemental effect. Track sustained decode and concurrent callers as guards. Report inconclusive effects as such and collect more same-method pairs when needed.
-- Preserve the tested FP32 results, public error/alias semantics, returned-output lifetime and concurrent use. Keep small shapes, purego, and Metal behavior covered. Show that the targeted elapsed projection work decreased on Llama, with CPU sample counts and percentages reported alongside wall time. A microbenchmark gain alone leaves end-to-end validation outstanding.
-
-## Return contract and Llama integration
-
-Return the upstream commit(s) and their purposes, immutable version or exact commit for the Llama pin, candidate dependency checksum, correctness results, commands, paired raw and summarized benchmark results, profile changes and artifact locations, and any known tradeoffs. Include the threshold/cap rationale and integration instructions.
-
-The Llama agent will inspect the upstream change against this handoff, verify the returned version and module checksum, update the pin in a focused commit, and rerun the complete Llama validation above on the same hardware. Pass 6 concludes after verifying the targeted bottleneck decreased in the real workload and documenting the paired end-to-end effects. Future candidates will be ranked from the post-integration evidence.
+Add the relevant `-modfile` to each build when measuring the candidate. See `summary.txt` in the archive for extracted observations. Pass 6 reproduction and evidence remain in Llama history at `422bfa41277d9135c5badcd803320de8f43585fe:NEURALNETWORK_OPTIMIZATION_HANDOFF.md`.

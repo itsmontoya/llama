@@ -115,7 +115,7 @@ run. Across six profiled primary prefills, those kernels sampled 2.12 s
 of CPU before and 1.47 s after. In the release's 29-token profile, complete
 three-row groups accounted for 45.6% of prefill CPU and the two scalar
 remainder rows accounted for 37.3%.
-[Benchmark reproduction and initial baseline](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+[Benchmark reproduction and initial baseline](https://github.com/itsmontoya/llama/blob/422bfa41277d9135c5badcd803320de8f43585fe/NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
 
 #### Optimization Pass 5 (Go 1.27.3)
 
