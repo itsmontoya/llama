@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"math"
 	"os"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +94,92 @@ func BenchmarkLlama32SustainedDecode(b *testing.B) {
 	b.Logf("decode steps=%d positions=%d..%d", steps, len(ids), capacity-1)
 	b.Logf("total time per %d-step window across %d iterations: %v", window, b.N, decodeTime)
 	b.Logf("suffix=%v final FP32 logits SHA256=%x", suffix, llama32LogitDigest(logits))
+}
+
+func BenchmarkLlama32ConcurrentSustainedDecode(b *testing.B) {
+	const prompt = "The capital of France is"
+	const callers, steps = 2, 32
+	model, ids := setupLlama32SupplementalBenchmark(b, prompt, 6)
+	capacity := int64(len(ids) + steps)
+	type result struct {
+		logits []float32
+		suffix [1 + steps]int64
+		err    error
+		wall   time.Duration
+	}
+	var results [callers]result
+	var elapsed time.Duration
+	var sessionTime [callers]time.Duration
+	for b.Loop() {
+		b.StopTimer()
+		var sessions [callers]*Session
+		for i := range sessions {
+			session, err := model.NewSession(capacity)
+			if err != nil {
+				b.Fatal(err)
+			}
+			row, err := session.Prefill(ids)
+			if err != nil {
+				b.Fatal(err)
+			}
+			winner, err := greedyToken(row)
+			if err != nil {
+				b.Fatal(err)
+			}
+			sessions[i] = session
+			results[i].suffix[0] = winner
+		}
+
+		start := make(chan struct{})
+		var ready, done sync.WaitGroup
+		ready.Add(callers)
+		var released time.Time
+		for i, session := range sessions {
+			done.Go(func() {
+				ready.Done()
+				<-start
+				result := &results[i]
+				for step := range steps {
+					result.logits, result.err = session.Decode(result.suffix[step])
+					if result.err != nil {
+						return
+					}
+					result.suffix[step+1], result.err = greedyToken(result.logits)
+					if result.err != nil {
+						return
+					}
+				}
+				result.wall = time.Since(released)
+			})
+		}
+		ready.Wait()
+		b.StartTimer()
+		released = time.Now()
+		close(start)
+		done.Wait()
+		elapsed += time.Since(released)
+		b.StopTimer()
+
+		for i, result := range results {
+			if result.err != nil || sessions[i].Position() != capacity {
+				b.Fatalf("session %d ended at position %d, want %d: %v", i, sessions[i].Position(), capacity, result.err)
+			}
+			sessionTime[i] += result.wall
+		}
+		if results[0].suffix != results[1].suffix || !slices.Equal(results[0].logits, results[1].logits) {
+			b.Fatal("concurrent decode sessions disagree")
+		}
+		b.StartTimer()
+	}
+	tokens := float64(steps) * float64(b.N)
+	b.ReportMetric(elapsed.Seconds()/float64(b.N), "decode-wall-s/op")
+	b.ReportMetric(callers*tokens/elapsed.Seconds(), "aggregate-tok/s")
+	b.ReportMetric(tokens/sessionTime[0].Seconds(), "session0-tok/s")
+	b.ReportMetric(tokens/sessionTime[1].Seconds(), "session1-tok/s")
+	b.ReportMetric(sessionTime[0].Seconds()/tokens, "session0-s/token")
+	b.ReportMetric(sessionTime[1].Seconds()/tokens, "session1-s/token")
+	b.Logf("callers=%d decode steps per session=%d positions=%d..%d", callers, steps, len(ids), capacity-1)
+	b.Logf("suffix=%v final FP32 logits SHA256=%x", results[0].suffix, llama32LogitDigest(results[0].logits))
 }
 
 func llama32LogitDigest(logits []float32) [sha256.Size]byte {
