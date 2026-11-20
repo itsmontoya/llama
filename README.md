@@ -85,6 +85,31 @@ The FP32 model payload estimate is 4,943,257,600 bytes and the KV payload estima
 is 851,968 bytes. Peak RSS covers the full benchmark process, including loader
 scratch, tokenizer, temporary tensors, and Go runtime overhead.
 
+#### Optimization Pass 7 (Go 1.27.3)
+
+`neuralnetwork v0.10.17` processes one- and two-row FP32 prefill remainders
+in the same output-column shards as complete three-row groups. The one-row
+tile reuses the existing kernel, and the two-row tile shares weight loads while
+preserving ascending FP32 accumulation.
+
+| Workload | v0.10.16 median | v0.10.17 median | Median paired change |
+| --- | ---: | ---: | ---: |
+| 28-token prefill | 1.616 s | 0.752 s | −53.6% |
+| 29-token prefill | 2.575 s | 0.849 s | −67.2% |
+| Primary TTFT | 0.1845 s | 0.1840 s | +2.5% |
+| Primary cached generation | 0.736 s | 0.739 s | +0.7% |
+| Sustained decode | 12.50 tokens/s | 12.27 tokens/s | +1.8% |
+
+On Apple M3 with `GOMAXPROCS=8`, both remainder workloads were faster in
+all five pairs. The 29-token block projections fell from 2.407 to 0.618 s
+in the timing probes. Across three profiled 29-token prefills, the prior
+3.93 sampled CPU seconds in the scalar loop fell to 0.38 s in the two-row
+tile. Primary and sustained decode effects were inconclusive across 12
+and seven pairs. The 27-token and concurrent guards had paired median changes of
+−0.4% and +0.4%. All pinned continuation and supplemental
+logit checks matched.
+[Baseline, benchmark commands, and upstream handoff](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+
 #### Optimization Pass 6 (Go 1.27.3)
 
 `neuralnetwork v0.10.16` parallelizes complete three-row groups in host
@@ -115,7 +140,7 @@ run. Across six profiled primary prefills, those kernels sampled 2.12 s
 of CPU before and 1.47 s after. In the release's 29-token profile, complete
 three-row groups accounted for 45.6% of prefill CPU and the two scalar
 remainder rows accounted for 37.3%.
-[Benchmark reproduction and initial baseline](NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
+[Benchmark reproduction and initial baseline](https://github.com/itsmontoya/llama/blob/422bfa41277d9135c5badcd803320de8f43585fe/NEURALNETWORK_OPTIMIZATION_HANDOFF.md#llama-validation)
 
 #### Optimization Pass 5 (Go 1.27.3)
 
