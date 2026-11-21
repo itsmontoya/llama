@@ -33,27 +33,34 @@ type LayerWeights struct {
 
 type blockWeights struct {
 	attentionNorm, wq, wk, wv, wo *tensor.Tensor
-	ffnNorm, gate, up, down       *tensor.Tensor
-}
-
-func weightTensor(name string, shape []int64, values []float32) (*tensor.Tensor, error) {
-	for index, value := range values {
-		if !finite(float64(value)) {
-			return nil, fmt.Errorf("llama: %s contains nonfinite value at %d", name, index)
-		}
-	}
-	out, err := tensor.FromFloat32(shape, values)
-	if err != nil {
-		return nil, fmt.Errorf("llama: %s: %w", name, err)
-	}
-	return out, nil
+	ffnNorm                       *tensor.Tensor
+	gate, up, down                *tensor.PreparedRightTranspose
 }
 
 type decoderWeight struct {
-	name   string
-	shape  []int64
-	values []float32
-	target **tensor.Tensor
+	name     string
+	shape    []int64
+	values   []float32
+	target   **tensor.Tensor
+	prepared **tensor.PreparedRightTranspose
+}
+
+func (w decoderWeight) store(name string, values []float32) error {
+	for index, value := range values {
+		if !finite(float64(value)) {
+			return fmt.Errorf("llama: %s contains nonfinite value at %d", name, index)
+		}
+	}
+	var err error
+	if w.prepared != nil {
+		*w.prepared, err = tensor.PrepareRightTranspose(w.shape, values)
+	} else {
+		*w.target, err = tensor.FromFloat32(w.shape, values)
+	}
+	if err != nil {
+		return fmt.Errorf("llama: %s: %w", name, err)
+	}
+	return nil
 }
 
 // visitWeights defines the shape and destination of each private tensor.
@@ -63,15 +70,15 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 	vocabShape := []int64{c.VocabSize, c.Dim}
 	normShape := []int64{c.Dim}
 	for _, weight := range []decoderWeight{
-		{"token_embedding", vocabShape, w.TokenEmbedding, &d.embedding},
-		{"final_norm", normShape, w.FinalNorm, &d.norm},
+		{name: "token_embedding", shape: vocabShape, values: w.TokenEmbedding, target: &d.embedding},
+		{name: "final_norm", shape: normShape, values: w.FinalNorm, target: &d.norm},
 	} {
 		if err := visit(-1, weight); err != nil {
 			return err
 		}
 	}
 	if !c.TieEmbeddings {
-		if err := visit(-1, decoderWeight{"output", vocabShape, w.Output, &d.output}); err != nil {
+		if err := visit(-1, decoderWeight{name: "output", shape: vocabShape, values: w.Output, target: &d.output}); err != nil {
 			return err
 		}
 	}
@@ -86,15 +93,15 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 			source = w.Layers[layer]
 		}
 		for _, weight := range []decoderWeight{
-			{"attention_norm", normShape, source.AttentionNorm, &block.attentionNorm},
-			{"wq", qShape, source.WQ, &block.wq},
-			{"wk", kvShape, source.WK, &block.wk},
-			{"wv", kvShape, source.WV, &block.wv},
-			{"wo", []int64{c.Dim, c.Dim}, source.WO, &block.wo},
-			{"ffn_norm", normShape, source.FFNNorm, &block.ffnNorm},
-			{"w_gate", upShape, source.WGate, &block.gate},
-			{"w_up", upShape, source.WUp, &block.up},
-			{"w_down", downShape, source.WDown, &block.down},
+			{name: "attention_norm", shape: normShape, values: source.AttentionNorm, target: &block.attentionNorm},
+			{name: "wq", shape: qShape, values: source.WQ, target: &block.wq},
+			{name: "wk", shape: kvShape, values: source.WK, target: &block.wk},
+			{name: "wv", shape: kvShape, values: source.WV, target: &block.wv},
+			{name: "wo", shape: []int64{c.Dim, c.Dim}, values: source.WO, target: &block.wo},
+			{name: "ffn_norm", shape: normShape, values: source.FFNNorm, target: &block.ffnNorm},
+			{name: "w_gate", shape: upShape, values: source.WGate, prepared: &block.gate},
+			{name: "w_up", shape: upShape, values: source.WUp, prepared: &block.up},
+			{name: "w_down", shape: downShape, values: source.WDown, prepared: &block.down},
 		} {
 			if err := visit(layer, weight); err != nil {
 				return fmt.Errorf("llama: layer %d: %w", layer, err)
@@ -110,8 +117,7 @@ func (d *Decoder) loadWeights(w Weights, read func(layer int, weight decoderWeig
 		if err != nil {
 			return err
 		}
-		*weight.target, err = weightTensor(name, weight.shape, values)
-		return err
+		return weight.store(name, values)
 	}); err != nil {
 		return err
 	}
