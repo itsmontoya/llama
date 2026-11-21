@@ -80,11 +80,7 @@ func gather(input *tensor.Tensor, indices []int64, axis int64) (*tensor.Tensor, 
 
 func project(input, weight *tensor.Tensor) (*tensor.Tensor, error) {
 	config := tensor.GemmConfig{TransposeB: true, Alpha: 1}
-	shape, err := tensor.GemmShape(input.Shape(), weight.Shape(), config)
-	if err != nil {
-		return nil, err
-	}
-	out, err := tensor.New(tensor.Float32, shape)
+	out, err := projectionOutput(input, weight.Shape(), config)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +88,26 @@ func project(input, weight *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func projectPrepared(input *tensor.Tensor, weight *tensor.PreparedRightTranspose) (*tensor.Tensor, error) {
+	config := tensor.GemmConfig{TransposeB: true, Alpha: 1}
+	out, err := projectionOutput(input, weight.Shape(), config)
+	if err != nil {
+		return nil, err
+	}
+	if err = weight.GemmInto(input, nil, out, config); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func projectionOutput(input *tensor.Tensor, weightShape []int64, config tensor.GemmConfig) (*tensor.Tensor, error) {
+	shape, err := tensor.GemmShape(input.Shape(), weightShape, config)
+	if err != nil {
+		return nil, err
+	}
+	return tensor.New(tensor.Float32, shape)
 }
 
 func matmul(left, right *tensor.Tensor) (*tensor.Tensor, error) {

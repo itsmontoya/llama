@@ -186,11 +186,11 @@ func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sin
 		return nil, err
 	}
 	record(trace, prefix+"ffn_norm", n)
-	gate, err := project(n, block.gate)
+	gate, err := projectPrepared(n, block.gate)
 	if err != nil {
 		return nil, err
 	}
-	up, err := project(n, block.up)
+	up, err := projectPrepared(n, block.up)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sin
 		return nil, err
 	}
 	record(trace, prefix+"swiglu", gated)
-	down, err := project(gated, block.down)
+	down, err := projectPrepared(gated, block.down)
 	if err != nil {
 		return nil, err
 	}
