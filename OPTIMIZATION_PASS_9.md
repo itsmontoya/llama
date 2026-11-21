@@ -1,5 +1,7 @@
 # Llama Optimization Pass 9 investigation
 
+The published v0.10.19 integration was evaluated separately. The production pin remains v0.10.18. [Release evaluation](OPTIMIZATION_PASS_9_RELEASE.md)
+
 ## Baseline
 
 The clean `optimization-pass-9` branch started at `b07f4ae100d0ada87a8a4485f294bdacb7fe137e`, the Pass 8 merge on local `main` and `origin/main`. The Pass 8 integration commit `ecf8948` is an ancestor of `main`. Its `go.mod` and `go.sum` match the baseline. The linked module is `github.com/itsmontoya/neuralnetwork v0.10.18` at tag commit `ce91677fa12ff521309764e4664a296f57a52427`. The module checksum is `h1:j1PoyjYzxYhlwaWOUp/KlSh4V2xu8Upt/9kyIcnK/AU=` and the module-file checksum is `h1:SafbkuDehVErsuJAL5FHFsLhKJbeh/OI3ItvbmwDafw=`. `go mod verify` passed, and the baseline binary records the exact published module.
