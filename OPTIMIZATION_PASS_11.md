@@ -163,3 +163,35 @@ sh "$artifact/range-matrix.sh" "$artifact"
 ```
 
 `benchmark.sh` builds the root test binary and launches fixed `-test.benchtime 1x` processes. It alternates scenario order and verifies the same prompt snapshot in every process. `summarize-benchmarks.py` validates every supplemental digest and decode suffix and reports medians and ranges. `profile.sh` builds a Llama-only overlay and collects separately labeled CPU, alloc and trace runs. `prep-analysis.sh` builds the text profile summaries, binary disassembly and per-site trace reports. `verify-profiles.py` checks all 21 profiled process logs, both lane digests where applicable, and traced helper totals.
+
+## Evaluation of published v0.10.21
+
+The public Go module proxy and checksum database verified `github.com/itsmontoya/neuralnetwork v0.10.21` at tag commit `eeaf7d8893fa56f7beb7cc800f30b22e7d30ba26`. Its module checksum is `h1:q0cMj9fRlBc66F9CLGti9WP+mTQpdpxaAuIIdJAY8dg=` and its go.mod checksum is `h1:SafbkuDehVErsuJAL5FHFsLhKJbeh/OI3ItvbmwDafw=`. `go mod verify` passed in the candidate Llama checkout.
+
+PR #140 shipped test coverage for the one-row two-tile case, wider clipped packed ranges, exceptional FP32 inputs and unsupported contractions. A byte comparison of the two published modules found 616 matching files and these two test-file changes.
+
+- `internal/float32product/right_transpose_packed_test.go`
+- `tensor/prepared_right_transpose_test.go`
+
+The upstream PR reports 95 experimental pairs. The two-tile prototype reached a 0.64% paired median sustained-decode latency reduction at P8, with 9 of 12 pairs improved against the 3% and 10-of-12 targets. Experimental shared throughput changed by −0.19% and independent throughput by +2.28%. The prefill guard changes stayed within the 5% threshold. Upstream merged the tests after the prototype missed the sustained-decode target. [neuralnetwork PR #140](https://github.com/itsmontoya/neuralnetwork/pull/140)
+
+Both Llama benchmark binaries were built from `b0f041a` with Go 1.27.3 on the same Darwin ARM64 host and with identical build flags. Their Mach-O executable text matched after removing the embedded Go build-ID marker. The matching region contained 1,874,541 bytes and had SHA-256 `4de1204dd8217448b3fa2ee8504d3516cc3bdeb51d769086bd2c515cf194bad2`. The compatibility validation used a temporary Llama pin. The production dependency remains `v0.10.20` because `v0.10.21` ships coverage changes and the prototype missed the Pass 11 release gate.
+
+The release smoke test ran one independent process per version for each P8 workload, alternating build order across workloads. It also ran the `v0.10.21` sustained, shared and independent workloads at P4 and P6. All 22 processes passed the established output checks. The pairs below record the observed variation between builds with identical machine code.
+
+| P8 workload | v0.10.20 wall s | v0.10.21 wall s | v0.10.20 MiB/op | v0.10.21 MiB/op |
+| --- | ---: | ---: | ---: | ---: |
+| Primary cached generation | 2.071 | 1.285 | 110.69 | 110.69 |
+| Sustained decode | 2.119 | 3.860 | 278.88 | 278.88 |
+| Shared decode | 3.606 | 3.527 | 557.67 | 557.64 |
+| Independent decode | 6.408 | 6.534 | 557.66 | 557.64 |
+| 27-token prefill | 0.400 | 0.418 | 219.27 | 219.28 |
+| 28-token prefill | 0.432 | 0.437 | 227.30 | 227.31 |
+| 29-token prefill | 0.461 | 0.457 | 236.81 | 236.81 |
+| Two 6-token prefills | 0.165 | 0.165 | 97.58 | 97.57 |
+
+Across `v0.10.21` caps 4, 6 and 8, timed sustained decode allocated 277.70–278.88 MiB per run and the two-session workloads allocated 555.38–557.64 MiB. Independent peak RSS was 11.189–11.420 GiB. Allocation volumes stayed at the baseline scale. The elapsed times, including the divergent primary and sustained samples, have only one observation per build and workload.
+
+The default and purego candidate suites passed with pinned Llama 3.2 and TinyStories fixtures, including the frozen logits, cached/full-prefix parity and byte-exact CLI output. The candidate race suite covered the repository tests with TinyStories enabled and the optional Meta checkpoint disabled. The earlier `v0.10.20` baseline race suite exercised that checkpoint. Candidate `go vet` and upstream packed range, worker-cap, prepared GEMM ownership and concurrent retry checks passed. The first default run used expired TinyStories paths. Both fixtures were restored from the pinned revision, checked against their repository hashes and used in the successful reruns.
+
+The release evidence and reproduction scripts are in `/private/tmp/llama-pass11-release.gWDItFb1`. The archive is `/private/tmp/llama-pass11-v01021-evidence.gWDItFb1.tar.gz` with SHA-256 `6271a9744be556b072e7eb851e6f031c88713441e2c5bb560e531b05a8e03140`. It includes the signed checksum database lookup, upstream PR record, temporary module diffs, both binaries, smoke timings and correctness logs. The `before` and `after` source directories were exported from `b0f041a`. With both published modules cached and the fixture paths set, reproduce with `check.sh`, `smoke.sh`, and `tests.sh` in that order, passing the evidence directory as the sole argument to each.
