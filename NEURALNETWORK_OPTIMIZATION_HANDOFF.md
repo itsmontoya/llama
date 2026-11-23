@@ -96,3 +96,191 @@ The manifest and frozen Transformers reference live in Llama's `testdata/llama32
 The complete 33-token sustained suffix including the first selection is `[12366 13 1102 374 279 1455 95551 3363 304 9822 323 279 3224 753 6864 323 7928 3363 13 12366 374 279 1455 95551 16036 3158 304 279 7665 9323 323 279 1917]`. The primary suffix is the first eight of those IDs. The existing primary benchmark verifies the decoded bytes.
 
 The Llama investigation commit is `0af6bf0b26b48edda3099eb9baec368e6b1f7de9`. Its report includes the exact profiling and timing reproduction commands. The fresh evidence archive is `/private/tmp/llama-pass9-evidence.hqiIiZXs.tar.gz`. The evidence archive contains runnable Llama-only diagnostic overlays and the raw logs. [Pass 9 investigation](OPTIMIZATION_PASS_9.md)
+
+---
+
+# Llama LL-01 results and NN-06 handoff
+
+LL-01 integrates `github.com/itsmontoya/neuralnetwork v0.11.0` at
+`95e3339bbb44615137c32599f89841aad1c088fb`. The module and module-file
+checksums are `h1:+QMn9KogezZ8IbCL1d4xSVynQtbswxe+5tdqLB5qoto=` and
+`h1:SafbkuDehVErsuJAL5FHFsLhKJbeh/OI3ItvbmwDafw=`. The Llama branch is
+`gpu-ll-01`, based on Llama `main` at
+`bdc22d2f6d23512788f26143144bd7d157941215`. The production change is
+`65bde40` and the CLI and test entry points are in `fcf1190`.
+[NN-05 released FFN contract](https://github.com/itsmontoya/neuralnetwork/pull/145)
+
+## Resident FFN and correctness
+
+The hybrid FFN starts at the CPU post-attention RMSNorm result `[M,2048]`.
+One scope records gate and up projections with logical row-major weights
+`[8192,2048]`, SwiGLU into a distinct `[M,8192]` tensor, and the down
+projection with weight `[2048,8192]` into a distinct `[M,2048]` tensor.
+Each layer uploads one normalized input and downloads one down result after
+completion for the CPU residual. Scope close drains outstanding work on
+cancellation. A cached step publishes its position only after logit validation.
+The same model device serves independent calls, with disjoint scratch for each
+active call. The attention, normalization, residual, KV and classification
+paths use the existing Llama tensor operations and cache layout.
+
+On Apple M3, the six-token prompt IDs were
+`[128000 791 6864 315 9822 374]` and both cached and uncached CLI modes
+returned `[12366 13 1102 374 279 1455 95551 3363]` and
+`" Paris. It is the most populous city\n"`. The maximum sampled absolute
+error against the frozen Transformers observations was `5.09023666e-5`
+with a maximum tolerance fraction of `0.0309471734` under the existing
+`1e-3 + 1e-3*abs(reference)` bound. Position 11 retained the frozen winner
+with a margin of `0.0433597565` versus `0.043340683` in Transformers.
+The untagged CPU maximum sampled absolute error was `4.95910645e-5`.
+Across all 128,256 logits, the observed maximum cached/full-prefix hybrid
+absolute error was zero across the eight greedy steps and the three
+27/28/29-token prefill tails under the existing `1e-4` absolute and relative
+bounds. Two concurrent sessions gave the same results as their corresponding
+full-prefix executions. Synthetic Llama traces had maximum absolute error
+`4.76837158e-7` against CPU, and the released realistic-size synthetic FFN
+had maximum absolute error `1.52e-6` against FP64 across M=1/27/28/29.
+The tests include partial loading failure, scope recording failure, cancellation
+after submission, retry at the same position, and close. Frozen artifacts
+use the revision and hashes documented above.
+
+## Measured boundaries
+
+Four short fresh-process pairs alternated the prepared-default and explicit
+Metal FFN modes of one Metal-tagged binary. Companion fresh processes used
+the untagged host-only integration binary and the unchanged untagged Llama
+base. All measured outputs matched the frozen eight IDs and sampled logits.
+Each process loaded the same checkpoint and took one six-token prefill and
+seven timed decode steps without an inference warmup. The fixture was verified
+before the campaign. The driver used frozen token IDs, so load plus generation
+excludes tokenization. Process wall includes test setup, correctness checks,
+post-run GC and RSS observation. Timings below are medians and ranges.
+
+| Mode | Model load, s | Prefill, ms | Mean decode, ms/token | Load + generation, s | Peak RSS, GiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Starting main, untagged | 1.851 (1.810–1.877) | 109.3 (105.1–124.1) | 65.09 (65.02–68.42) | 2.420 (2.371–2.475) | 6.274 (6.273–6.274) |
+| Integration CPU, untagged | 1.870 (1.855–1.910) | 113.1 (109.2–128.8) | 67.15 (64.84–73.96) | 2.464 (2.435–2.522) | 6.274 (6.274–6.274) |
+| Integration default FFN, tagged | 1.831 (1.796–1.887) | 3341 (1302–3492) | 1115 (926–1331) | 11.951 (11.632–14.697) | 14.101 (14.066–14.121) |
+| Integration Metal FFN, tagged | 1.792 (1.766–1.988) | 335.0 (315.3–385.6) | 263.66 (259.06–268.56) | 3.988 (3.918–4.202) | 8.625 (8.623–9.474) |
+
+The untagged build measures host execution. The tagged default uses the
+existing prepared interface with the ordinary release tensor adapter. The tag
+disables prepared packing and allows its matrix operations to dispatch to
+Metal. The matched tagged test controls the build and model, while the
+untagged test is the actual CPU baseline. The median paired Metal/untagged
+ratios were 2.96 for prefill, 3.98 for mean decode and 1.61 for load plus
+generation. Eight-output generation including greedy selection took 2.183 s
+on Metal and 0.581 s on the untagged CPU. Mean decode across positions 6–37
+in two matched longer runs was 315.0 ms on Metal versus 66.66 ms on untagged
+CPU. The longer runs greedily checked the first eight predictions, then used
+fixed replay inputs beyond the frozen trajectory.
+
+A separate three-process host diagnostic measured `OpenDefault` at
+28.19 ms (27.42–48.57), 48 buffer allocations at 1.75 ms (1.54–1.82),
+and 3 GiB of weight uploads at 183.65 ms (181.86–195.72). Each short
+generation records 128 scopes and 512 FFN dispatches. Across these scopes,
+median create/encode/submit/close totals were 0.493/1.978/0.579/0.081 ms.
+Wait accounted for 408.61 ms (398.81–411.47) of 411.87 ms
+(402.85–414.56) of FFN command wall time. Wait includes GPU execution,
+queueing and Go scheduling. Published `gpu` APIs expose neither GPU kernel
+timestamps nor separate lazy pipeline compilation times. The first prefill
+includes first-use pipeline preparation. The two boundary transfers copied
+1,703,936 bytes per direction across the short generation. Upload and
+download took 0.214 and 0.271 ms in total at the medians. The surrounding
+CPU tensor copies took 0.205 ms to extract and 0.504 ms to rewrap. Treat
+numbers from the diagnostic binaries as separate from the uninstrumented
+paired medians. The two copies per layer are part of the current API
+contract. Most hybrid wall time was outside the timed FFN scopes.
+
+The checkpoint retains 3 GiB across 48 Metal FFN tensors (192 MiB per
+layer), with no independently prepared CPU FFN copy on this path.
+The other FP32 model tensors account for 1,722,032,128 bytes.
+One shape-matched scratch set requests `4*M*(2*2048+3*8192)` bytes,
+or 112 KiB at M=1 and 3.172 MiB at M=29. Host staging includes one
+converted checkpoint tensor at a time, extra Q/K rotary permutation storage,
+and a copied activation input and caller-owned output. The largest decoded
+tensor is the 1,050,673,152-byte embedding. Post-GC Go heap and process RSS
+medians were 1.605 GiB and 8.140 GiB for Metal versus 4.605 GiB and
+6.274 GiB for the untagged CPU. Across short runs, observed per-generation Go
+allocations totaled 12.905 GiB for Metal versus 0.108 GiB for the untagged
+CPU. The existing tagged matrix adapter copies ordinary operands, including
+the tied embedding/classifier, during execution. Unified memory permits CPU
+and GPU accounting to overlap. Peak RSS and requested native bytes describe
+different measurements.
+
+## Generic operations and storage for NN-06
+
+- Keep the existing rank-two right-transposed Q/K/V and output projections.
+  For the pinned model Q and O weights are `[2048,2048]` and K/V weights are
+  `[512,2048]`. The resident projection results must support a checked
+  layout transformation from `[M,2048]` or `[M,512]` to the logical
+  `[M,32,64]` and `[M,8,64]` head layouts. Preserve the existing grouped
+  output order on the path back to `[M,2048]`.
+- Provide adjacent-pair rotary multiplication for Q and K, using
+  caller-supplied coefficients or frequencies at absolute positions. Llama
+  already normalizes checkpoint Q/K row order and computes the scaled
+  coefficients. The numeric step is
+  `(x0*cos - x1*sin, x1*cos + x0*sin)` with per-position coefficients
+  and a broadcast head dimension. V stays in projection order.
+- Provide device-resident stable masked attention math for M=1 and prefill.
+  For head width 64 and the 32:8 GQA mapping, queries in group `h/4` read
+  that group's K/V head. Support arbitrary compatible MHA, GQA and MQA.
+  The operation needs grouped/batched score and value products or their fused
+  equivalent, multiplication by `1/sqrt(head_width)`, an absolute-position
+  causal mask excluding future keys before stable softmax, and accumulation
+  over populated values only. Avoid materializing repeated K/V heads as
+  physical copies if a head mapping can express the same contract.
+- Add a checked device-side append/read-range primitive or a precise layout
+  view for session-owned K/V planes `[capacity, KV_heads, head_width]`.
+  Prefill writes a prefix and decode writes one row at the next absolute
+  position. Llama owns the committed length. Failed or canceled recordings
+  must not publish the new length or damage prior rows. A retry must overwrite
+  the staged rows before attention can read them. Support disjoint mutable
+  sessions sharing read-only weights. Existing full-buffer leases and
+  failed-write invalidation need a documented contract for protecting
+  committed history across partial writes and device failures.
+- RMSNorm over the last axis needs exact row-broadcast handling for a
+  `[2048]` norm weight and a supplied epsilon. Together with existing Add,
+  keeping normalization and residual operations resident avoids recreating
+  an attention-to-FFN host round trip.
+
+For upstream acceptance, encode a complete attention-shaped sequence
+without intermediate host transfers and check both single-row and multi-row
+inputs, position offsets, uneven tails, MHA/GQA/MQA, empty history,
+cancellation and concurrent KV ownership. Return operation shapes and
+failure semantics, scratch and KV bytes, scope counts and actual Metal
+diagnostics. The Llama layer remains the owner of checkpoint shapes,
+frequency policy, KV capacity and transactions.
+
+## Reproduce the downstream boundary
+
+Follow [the snapshot and Metal test instructions](testdata/README.md#experimental-metal-ffn-parity).
+On the measured Apple M3 Mac15,13 (24 GiB, 10 GPU cores, macOS 26.5.2
+25F84, SDK 14.4 and Go 1.27.3), use `GOWORK=off`, `CGO_ENABLED=1`,
+`GOARM64=v8.0`, and `GOMAXPROCS=8`. Runtime MSL compilation works.
+The offline `metal` compiler is unavailable on this host.
+
+Build the tagged benchmark once, then run the two named benchmarks in
+separate fresh processes and alternate their order:
+
+```sh
+GOWORK=off CGO_ENABLED=1 go test -c -tags=metal -o "$bin_dir/llama-metal.test" .
+GOWORK=off CGO_ENABLED=1 go test -c -o "$bin_dir/llama-cpu.test" .
+LLAMA_32_1B_MODEL_DIR="$model_dir" GOMAXPROCS=8 /usr/bin/time -l \
+  "$bin_dir/llama-metal.test" -test.run '^$' \
+  -test.bench '^BenchmarkLlama32CachedGeneration$' -test.benchtime=1x -test.benchmem
+LLAMA_32_1B_MODEL_DIR="$model_dir" GOMAXPROCS=8 /usr/bin/time -l \
+  "$bin_dir/llama-metal.test" -test.run '^$' \
+  -test.bench '^BenchmarkLlama32MetalCachedGeneration$' -test.benchtime=1x -test.benchmem
+LLAMA_32_1B_MODEL_DIR="$model_dir" GOMAXPROCS=8 /usr/bin/time -l \
+  "$bin_dir/llama-cpu.test" -test.run '^$' \
+  -test.bench '^BenchmarkLlama32CachedGeneration$' -test.benchtime=1x -test.benchmem
+```
+
+The committed benchmark also checks tokenization and decoded bytes. Its
+reported generation metrics separate tokenizer setup and verify the model
+files before starting the timed load. Local raw samples, exact paired driver,
+instrumentation overlay, benchmark binary, test logs and summarizer are in
+`.benchmarks/gpu-ll-01/2026-11-23-m3/` under the isolated Llama checkout.
+The paired driver is reproducible there with `zsh run.zsh` from the
+repository root using the script's repository-relative path. The diagnostic
+overlay instruments Llama only and consumes the released dependency.

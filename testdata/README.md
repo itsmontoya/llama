@@ -236,6 +236,24 @@ from a fresh full-prefix forward using `atol = rtol = 1e-4`. Both paths must
 select the frozen winning ID. The test checks snapshot hashes and reports
 maximum absolute errors and tolerance fractions with positions and token IDs.
 
+### Experimental Metal FFN parity
+
+On Apple Silicon macOS, verify the snapshot as above, then check the hybrid
+decoder and CLI in serial test packages:
+
+```sh
+CGO_ENABLED=1 GOWORK=off LLAMA_32_1B_MODEL_DIR="$model_dir" \
+  go test -p=1 -tags=metal -run '^TestLlama32Metal(Generation)?$' -count=1 -v ./...
+```
+
+The tests use the same frozen observations and tolerances. The hybrid decoder
+checks all eight cached greedy steps against the fixture and the hybrid
+full-prefix execution. It also checks 27-, 28-, and 29-token prefill and two
+concurrent sessions sharing one model. The CLI test checks cached and uncached
+IDs, decoded bytes and the trailing newline. Synthetic Metal tests cover trace
+ownership, weight-loading failure, canceled prefill, canceled submitted decode
+and retry.
+
 ### Llama 3 tokenizer parity
 
 After verifying the snapshot against the manifest, compare prompt IDs and
