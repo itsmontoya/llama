@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -68,6 +69,12 @@ func (s *Session) Reset() {
 // on success. The session must be empty. Callers must synchronize any
 // mutation of tokens while Prefill runs.
 func (s *Session) Prefill(tokens []int64) ([]float32, error) {
+	return s.PrefillContext(context.Background(), tokens)
+}
+
+// PrefillContext is Prefill with cancellation. It drains outstanding Metal
+// work before returning. A canceled step leaves Position unchanged.
+func (s *Session) PrefillContext(ctx context.Context, tokens []int64) (out []float32, err error) {
 	if s == nil || s.decoder == nil {
 		return nil, fmt.Errorf("llama: session is uninitialized")
 	}
@@ -77,10 +84,10 @@ func (s *Session) Prefill(tokens []int64) ([]float32, error) {
 	if int64(len(tokens)) > s.capacity {
 		return nil, fmt.Errorf("llama: prompt length %d exceeds session capacity %d", len(tokens), s.capacity)
 	}
-	if err := s.decoder.validatePrefix(tokens); err != nil {
+	if err = s.decoder.validatePrefix(tokens); err != nil {
 		return nil, err
 	}
-	x, err := s.decoder.forwardPrefix(tokens, nil, func(layer int, k, v *tensor.Tensor) error {
+	x, err := s.decoder.forwardPrefix(ctx, tokens, nil, func(layer int, k, v *tensor.Tensor) error {
 		return s.storeKV(layer, 0, k, v)
 	})
 	if err != nil {
@@ -91,7 +98,7 @@ func (s *Session) Prefill(tokens []int64) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("llama: final prompt row: %w", err)
 	}
-	return s.commit(last, position)
+	return s.commit(ctx, last, position)
 }
 
 // Decode appends a token at Position and returns its caller-owned logit row.
@@ -99,6 +106,12 @@ func (s *Session) Prefill(tokens []int64) ([]float32, error) {
 // retry at the same position or call Reset. Any provisional rows beyond the
 // committed history are overwritten before attention can read them again.
 func (s *Session) Decode(token int64) ([]float32, error) {
+	return s.DecodeContext(context.Background(), token)
+}
+
+// DecodeContext is Decode with cancellation. It drains outstanding Metal
+// work before returning. A canceled step leaves Position unchanged.
+func (s *Session) DecodeContext(ctx context.Context, token int64) (out []float32, err error) {
 	if s == nil || s.decoder == nil {
 		return nil, fmt.Errorf("llama: session is uninitialized")
 	}
@@ -112,6 +125,11 @@ func (s *Session) Decode(token int64) ([]float32, error) {
 	if token < 0 || token >= d.config.VocabSize {
 		return nil, fmt.Errorf("llama: token at position %d is out of range: %d", s.position, token)
 	}
+	var scratch *metalFFNScratch
+	if scratch, err = d.metal.begin(ctx, d.config, 1); err != nil {
+		return nil, err
+	}
+	defer scratch.close()
 	x, err := gather(d.embedding, []int64{token}, 0)
 	if err != nil {
 		return nil, fmt.Errorf("llama: embedding: %w", err)
@@ -123,17 +141,17 @@ func (s *Session) Decode(token int64) ([]float32, error) {
 	next := s.position + 1
 	for index, block := range d.blocks {
 		attend := func(q, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
-			if err := s.storeKV(index, s.position, k, v); err != nil {
-				return nil, nil, err
+			if storeErr := s.storeKV(index, s.position, k, v); storeErr != nil {
+				return nil, nil, storeErr
 			}
-			result, err := attendCached(q, s.layers[index], s.scores[:next], d.config)
-			return result, nil, err
+			result, attentionErr := attendCached(q, s.layers[index], s.scores[:next], d.config)
+			return result, nil, attentionErr
 		}
-		if x, err = d.forwardBlock(x, block, cosine, sine, attend, nil, ""); err != nil {
+		if x, err = d.forwardBlock(ctx, x, block, cosine, sine, attend, scratch, nil, ""); err != nil {
 			return nil, fmt.Errorf("llama: layer %d: %w", index, err)
 		}
 	}
-	return s.commit(x, next)
+	return s.commit(ctx, x, next)
 }
 
 func (s *Session) storeKV(layer int, position int64, k, v *tensor.Tensor) error {
@@ -152,7 +170,7 @@ func (s *Session) storeKV(layer int, position int64, k, v *tensor.Tensor) error 
 	return nil
 }
 
-func (s *Session) commit(x *tensor.Tensor, next int64) ([]float32, error) {
+func (s *Session) commit(ctx context.Context, x *tensor.Tensor, next int64) (out []float32, err error) {
 	logits, err := s.decoder.projectLogits(x, nil)
 	if err != nil {
 		return nil, err
@@ -165,6 +183,9 @@ func (s *Session) commit(x *tensor.Tensor, next int64) ([]float32, error) {
 		if !finite(float64(value)) {
 			return nil, fmt.Errorf("llama: nonfinite logit at position %d for ID %d", next-1, id)
 		}
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
 	}
 	s.position = next
 	return values, nil

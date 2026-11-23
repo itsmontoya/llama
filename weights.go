@@ -1,8 +1,10 @@
 package llama
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/itsmontoya/neuralnetwork/gpu"
 	"github.com/itsmontoya/neuralnetwork/tensor"
 )
 
@@ -35,6 +37,7 @@ type blockWeights struct {
 	attentionNorm, wq, wk, wv, wo *tensor.Tensor
 	ffnNorm                       *tensor.Tensor
 	gate, up, down                *tensor.PreparedRightTranspose
+	metal                         metalFFNWeights
 }
 
 type decoderWeight struct {
@@ -43,18 +46,21 @@ type decoderWeight struct {
 	values   []float32
 	target   **tensor.Tensor
 	prepared **tensor.PreparedRightTranspose
+	metal    **gpu.Tensor
 }
 
-func (w decoderWeight) store(name string, values []float32) error {
+func (w decoderWeight) store(name string, values []float32, model *metalFFNModel) (err error) {
 	for index, value := range values {
 		if !finite(float64(value)) {
 			return fmt.Errorf("llama: %s contains nonfinite value at %d", name, index)
 		}
 	}
-	var err error
-	if w.prepared != nil {
+	switch {
+	case w.metal != nil && model != nil:
+		*w.metal, err = model.upload(w.shape, values)
+	case w.prepared != nil:
 		*w.prepared, err = tensor.PrepareRightTranspose(w.shape, values)
-	} else {
+	default:
 		*w.target, err = tensor.FromFloat32(w.shape, values)
 	}
 	if err != nil {
@@ -99,9 +105,9 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 			{name: "wv", shape: kvShape, values: source.WV, target: &block.wv},
 			{name: "wo", shape: []int64{c.Dim, c.Dim}, values: source.WO, target: &block.wo},
 			{name: "ffn_norm", shape: normShape, values: source.FFNNorm, target: &block.ffnNorm},
-			{name: "w_gate", shape: upShape, values: source.WGate, prepared: &block.gate},
-			{name: "w_up", shape: upShape, values: source.WUp, prepared: &block.up},
-			{name: "w_down", shape: downShape, values: source.WDown, prepared: &block.down},
+			{name: "w_gate", shape: upShape, values: source.WGate, prepared: &block.gate, metal: &block.metal.gate},
+			{name: "w_up", shape: upShape, values: source.WUp, prepared: &block.up, metal: &block.metal.up},
+			{name: "w_down", shape: downShape, values: source.WDown, prepared: &block.down, metal: &block.metal.down},
 		} {
 			if err := visit(layer, weight); err != nil {
 				return fmt.Errorf("llama: layer %d: %w", layer, err)
@@ -111,13 +117,16 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 	return nil
 }
 
-func (d *Decoder) loadWeights(w Weights, read func(layer int, weight decoderWeight) (name string, values []float32, err error)) error {
-	if err := d.visitWeights(w, func(layer int, weight decoderWeight) error {
-		name, values, err := read(layer, weight)
-		if err != nil {
-			return err
+func (d *Decoder) loadWeights(ctx context.Context, w Weights, read func(layer int, weight decoderWeight) (name string, values []float32, err error)) (err error) {
+	if err = d.visitWeights(w, func(layer int, weight decoderWeight) (readErr error) {
+		if readErr = ctx.Err(); readErr != nil {
+			return readErr
 		}
-		return weight.store(name, values)
+		name, values, readErr := read(layer, weight)
+		if readErr != nil {
+			return readErr
+		}
+		return weight.store(name, values, d.metal)
 	}); err != nil {
 		return err
 	}
@@ -125,4 +134,23 @@ func (d *Decoder) loadWeights(w Weights, read func(layer int, weight decoderWeig
 		d.output = d.embedding
 	}
 	return nil
+}
+
+func (block blockWeights) forwardCPUFFN(n *tensor.Tensor, trace map[string]*tensor.Tensor, prefix string) (out *tensor.Tensor, err error) {
+	gate, err := projectPrepared(n, block.gate)
+	if err != nil {
+		return nil, err
+	}
+	up, err := projectPrepared(n, block.up)
+	if err != nil {
+		return nil, err
+	}
+	record(trace, prefix+"gate", gate)
+	record(trace, prefix+"up", up)
+	gated, err := swiGLU(gate, up)
+	if err != nil {
+		return nil, err
+	}
+	record(trace, prefix+"swiglu", gated)
+	return projectPrepared(gated, block.down)
 }
