@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -15,10 +16,10 @@ import (
 )
 
 func BenchmarkLlama32CachedGeneration(b *testing.B) {
-	benchmarkLlama32CachedGeneration(b, false)
+	benchmarkLlama32CachedGeneration(b, nil)
 }
 
-func benchmarkLlama32CachedGeneration(b *testing.B, metalFFN bool) {
+func benchmarkLlama32CachedGeneration(b *testing.B, loadMetal func(context.Context, string, int64) (*Decoder, HFGenerationConfig, error)) {
 	b.Helper()
 	dir := os.Getenv("LLAMA_32_1B_MODEL_DIR")
 	if dir == "" {
@@ -51,8 +52,8 @@ func benchmarkLlama32CachedGeneration(b *testing.B, metalFFN bool) {
 		err      error
 		start    = time.Now()
 	)
-	if metalFFN {
-		decoder, settings, err = LoadHFModelMetal(b.Context(), dir, contextCap)
+	if loadMetal != nil {
+		decoder, settings, err = loadMetal(b.Context(), dir, contextCap)
 	} else {
 		decoder, settings, err = LoadHFModel(dir, contextCap)
 	}
@@ -85,6 +86,9 @@ func benchmarkLlama32CachedGeneration(b *testing.B, metalFFN bool) {
 	}
 	capacity := int64(len(prompt)) + budget - 1
 	cacheBytes := 2 * config.Layers * capacity * config.KVHeads * (config.Dim / config.Heads) * 4
+	if decoder.metal != nil && decoder.metal.attention {
+		cacheBytes *= 2
+	}
 	b.Logf("GOMAXPROCS=%d prompt=%q prompt_tokens=%d output_cap=%d context_cap=%d cache_capacity=%d KV_payload_bytes=%d",
 		runtime.GOMAXPROCS(0), want.Prompt, len(prompt), want.MaxNewTokens, contextCap, capacity, cacheBytes)
 
@@ -123,6 +127,9 @@ func benchmarkLlama32CachedGeneration(b *testing.B, metalFFN bool) {
 		decode += time.Since(start)
 		if !slices.Equal(suffix, want.SuffixIDs) || session.Position() != capacity {
 			b.Fatalf("got suffix %v at position %d, want %v at %d", suffix, session.Position(), want.SuffixIDs, capacity)
+		}
+		if sessionErr = session.Close(); sessionErr != nil {
+			b.Fatal(sessionErr)
 		}
 		text, decodeErr := vocab.Decode(suffix)
 		if decodeErr != nil || hex.EncodeToString([]byte(text)) != want.DecodedHex {

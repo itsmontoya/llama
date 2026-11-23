@@ -90,6 +90,30 @@ normalized rows, runs gate/up, SwiGLU and down in one command, then downloads
 the result for the residual addition. The FP32 KV cache remains session-owned
 host storage. The layer crossings and model uploads contribute to latency.
 
+### Experimental Metal attention and KV cache
+
+Add `-attention-backend metal` to the Metal FFN command to keep attention,
+RoPE, normalization, residuals, and the FFN in one device command per step:
+
+```sh
+"$bin_dir/generate-metal" -ffn-backend metal -attention-backend metal \
+  -hf-model-dir "$model_dir" -context 512 \
+  -prompt 'The capital of France is' -max-new-tokens 8
+```
+
+`-uncached` recomputes each prefix with the same device operations and
+temporary caches. Cached generation keeps a private device history per
+session. The session commits all layers after classification succeeds.
+With neuralnetwork v0.11.1, two device slots per layer preserve the prior
+history on failure and require a device-side prefix copy at each append.
+
+In Go, use `LoadHFModelMetalAttention`. Call `Session.Close` when a cached
+session is finished, and `Decoder.Close` to release the model and any
+remaining device caches. Forward and cached steps use the regular tensor
+path for embedding lookup and classification. The full diagnostic trace
+requires attention probabilities, which the fused Metal operation does not
+export. Use the existing CPU or FFN-only mode for that trace.
+
 ### Ask questions in the terminal
 
 Run the interactive example with the same verified model directory:
