@@ -273,7 +273,7 @@ func TestLoadHFCheckpointReadFailures(t *testing.T) {
 			if err := os.Truncate(path, size); err != nil {
 				t.Fatal(err)
 			}
-			if decoder, err := loadHFCheckpoint(config, checkpoint); decoder != nil || err == nil || !strings.Contains(err.Error(), "read tensor "+strconv.Quote(test.tensorName)) {
+			if decoder, err := loadHFCheckpoint(t.Context(), config, checkpoint, nil); decoder != nil || err == nil || !strings.Contains(err.Error(), "read tensor "+strconv.Quote(test.tensorName)) {
 				t.Fatalf("got decoder=%p, err=%v; want read error for %s", decoder, err, test.tensorName)
 			}
 		})

@@ -1,6 +1,7 @@
 package llama
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/itsmontoya/neuralnetwork/tensor"
@@ -19,7 +20,7 @@ func NewDecoder(config Config, weights Weights) (*Decoder, error) {
 		return nil, fmt.Errorf("llama: tied embeddings require empty output weights")
 	}
 	decoder := &Decoder{config: config, blocks: make([]blockWeights, len(weights.Layers))}
-	if err := decoder.loadWeights(weights, func(_ int, weight decoderWeight) (string, []float32, error) {
+	if err := decoder.loadWeights(context.Background(), weights, func(_ int, weight decoderWeight) (string, []float32, error) {
 		return weight.name, weight.values, nil
 	}); err != nil {
 		return nil, err
@@ -33,6 +34,7 @@ type Decoder struct {
 	config                  Config
 	embedding, norm, output *tensor.Tensor
 	blocks                  []blockWeights
+	metal                   *metalFFNModel
 }
 
 // Config returns the decoder's resolved configuration by value.
@@ -45,7 +47,23 @@ func (d *Decoder) Config() Config {
 // Positions start at zero on every call. Outputs survive later calls; callers
 // must synchronize any mutation of their token slice while Forward reads it.
 func (d *Decoder) Forward(tokens []int64) (*tensor.Tensor, error) {
-	return d.forward(tokens, nil)
+	return d.ForwardContext(context.Background(), tokens)
+}
+
+// ForwardContext is Forward with cancellation. An outstanding Metal command
+// drains before the call returns and releases its scratch. CPU tensor
+// operations finish before the next cancellation check.
+func (d *Decoder) ForwardContext(ctx context.Context, tokens []int64) (out *tensor.Tensor, err error) {
+	return d.forward(ctx, tokens, nil)
+}
+
+// Close releases the resources of a Metal FFN decoder after active Metal
+// calls finish. It can be called repeatedly. CPU decoders need no cleanup.
+func (d *Decoder) Close() (err error) {
+	if d == nil {
+		return nil
+	}
+	return d.metal.close()
 }
 
 // ForwardWithTrace also retains named intermediate tensors for conformance.
@@ -54,7 +72,7 @@ func (d *Decoder) Forward(tokens []int64) (*tensor.Tensor, error) {
 // considerably more memory than Forward.
 func (d *Decoder) ForwardWithTrace(tokens []int64) (*tensor.Tensor, map[string]*tensor.Tensor, error) {
 	trace := make(map[string]*tensor.Tensor)
-	logits, err := d.forward(tokens, trace)
+	logits, err := d.forward(context.Background(), tokens, trace)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -76,19 +94,30 @@ func (d *Decoder) validatePrefix(tokens []int64) error {
 	return nil
 }
 
-func (d *Decoder) forward(tokens []int64, trace map[string]*tensor.Tensor) (*tensor.Tensor, error) {
-	if err := d.validatePrefix(tokens); err != nil {
+func (d *Decoder) forward(ctx context.Context, tokens []int64, trace map[string]*tensor.Tensor) (out *tensor.Tensor, err error) {
+	if err = d.validatePrefix(tokens); err != nil {
 		return nil, err
 	}
-	x, err := d.forwardPrefix(tokens, trace, nil)
+	x, err := d.forwardPrefix(ctx, tokens, trace, nil)
 	if err != nil {
 		return nil, err
 	}
-	return d.projectLogits(x, trace)
+	if out, err = d.projectLogits(x, trace); err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // forwardPrefix evaluates all blocks for an already validated prefix.
-func (d *Decoder) forwardPrefix(tokens []int64, trace map[string]*tensor.Tensor, capture func(int, *tensor.Tensor, *tensor.Tensor) error) (*tensor.Tensor, error) {
+func (d *Decoder) forwardPrefix(ctx context.Context, tokens []int64, trace map[string]*tensor.Tensor, capture func(int, *tensor.Tensor, *tensor.Tensor) error) (out *tensor.Tensor, err error) {
+	var scratch *metalFFNScratch
+	if scratch, err = d.metal.begin(ctx, d.config, int64(len(tokens))); err != nil {
+		return nil, err
+	}
+	defer scratch.close()
 	x, err := gather(d.embedding, tokens, 0)
 	if err != nil {
 		return nil, fmt.Errorf("llama: embedding: %w", err)
@@ -105,13 +134,13 @@ func (d *Decoder) forwardPrefix(tokens []int64, trace map[string]*tensor.Tensor,
 	for index, block := range d.blocks {
 		attend := func(q, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
 			if capture != nil {
-				if err := capture(index, k, v); err != nil {
-					return nil, nil, err
+				if captureErr := capture(index, k, v); captureErr != nil {
+					return nil, nil, captureErr
 				}
 			}
 			return attention(q, k, v, mask, d.config)
 		}
-		if x, err = d.forwardBlock(x, block, cosine, sine, attend, trace, fmt.Sprintf("layer.%d.", index)); err != nil {
+		if x, err = d.forwardBlock(ctx, x, block, cosine, sine, attend, scratch, trace, fmt.Sprintf("layer.%d.", index)); err != nil {
 			return nil, fmt.Errorf("llama: layer %d: %w", index, err)
 		}
 	}
@@ -134,7 +163,10 @@ func (d *Decoder) projectLogits(x *tensor.Tensor, trace map[string]*tensor.Tenso
 
 type blockAttention func(q, k, v *tensor.Tensor) (attended, probabilities *tensor.Tensor, err error)
 
-func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sine *tensor.Tensor, attend blockAttention, trace map[string]*tensor.Tensor, prefix string) (*tensor.Tensor, error) {
+func (d *Decoder) forwardBlock(ctx context.Context, x *tensor.Tensor, block blockWeights, cosine, sine *tensor.Tensor, attend blockAttention, scratch *metalFFNScratch, trace map[string]*tensor.Tensor, prefix string) (out *tensor.Tensor, err error) {
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	n, err := rmsNorm(x, block.attentionNorm, d.config.NormEpsilon)
 	if err != nil {
 		return nil, err
@@ -186,27 +218,16 @@ func (d *Decoder) forwardBlock(x *tensor.Tensor, block blockWeights, cosine, sin
 		return nil, err
 	}
 	record(trace, prefix+"ffn_norm", n)
-	gate, err := projectPrepared(n, block.gate)
+	var down *tensor.Tensor
+	if scratch == nil {
+		down, err = block.forwardCPUFFN(n, trace, prefix)
+	} else {
+		down, err = scratch.run(ctx, n, block.metal, trace, prefix)
+	}
 	if err != nil {
 		return nil, err
 	}
-	up, err := projectPrepared(n, block.up)
-	if err != nil {
-		return nil, err
-	}
-	record(trace, prefix+"gate", gate)
-	record(trace, prefix+"up", up)
-	gated, err := swiGLU(gate, up)
-	if err != nil {
-		return nil, err
-	}
-	record(trace, prefix+"swiglu", gated)
-	down, err := projectPrepared(gated, block.down)
-	if err != nil {
-		return nil, err
-	}
-	out, err := elementwise(h, down, tensor.AddInto)
-	if err != nil {
+	if out, err = elementwise(h, down, tensor.AddInto); err != nil {
 		return nil, err
 	}
 	record(trace, prefix+"output", out)

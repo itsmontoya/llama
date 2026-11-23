@@ -63,6 +63,33 @@ CGO_ENABLED=0 go build -tags=purego -o "$bin_dir/generate-purego" ./cmd/generate
   -prompt 'The capital of France is' -max-new-tokens 8
 ```
 
+### Experimental Metal FFN
+
+On Apple Silicon macOS, build with cgo and the `metal` tag and request the
+Metal FFN explicitly:
+
+```sh
+CGO_ENABLED=1 GOWORK=off go build -tags=metal -o "$bin_dir/generate-metal" ./cmd/generate
+"$bin_dir/generate-metal" -ffn-backend metal \
+  -hf-model-dir "$model_dir" -context 512 \
+  -prompt 'The capital of France is' -max-new-tokens 8
+```
+
+The default `-ffn-backend cpu` uses the existing FFN implementation.
+Both backend choices work with `-uncached`. An explicit Metal request returns
+an availability error if the build uses `purego`, disables cgo, or cannot open
+a Metal device. Use the untagged build for a host-only run. Ordinary tensor products,
+including the default FFN projections, can independently dispatch to Metal in
+a tagged build.
+
+The Metal option keeps each layer's three FP32 FFN weight matrices on one
+logical device. The 1B checkpoint uses 192 MiB per layer and 3 GiB across
+16 layers for those weights. The loader retains one representation of each
+FFN weight and copies one converted matrix at a time. Each layer uploads
+normalized rows, runs gate/up, SwiGLU and down in one command, then downloads
+the result for the residual addition. The FP32 KV cache remains session-owned
+host storage. The layer crossings and model uploads contribute to latency.
+
 ### Ask questions in the terminal
 
 Run the interactive example with the same verified model directory:
@@ -400,6 +427,14 @@ same decoder concurrently. Callers synchronize use of each session.
 incremental decode, and greedy selection for a caller-owned continuation.
 `decoder.GenerateGreedy` uses full-prefix execution with the same token budget,
 stop IDs, and lowest-ID tie break.
+
+For an explicit Metal FFN, use `LoadHFModelMetal(ctx, dir, maxContext)` and call
+`decoder.Close()` when finished. Each active inference call owns its Metal
+scratch and releases it before returning. Forward and session outputs remain
+caller-owned. `ForwardWithTrace` also downloads the requested FFN intermediates.
+`ForwardContext`, `PrefillContext`, and `DecodeContext` support cancellation.
+A canceled cached step leaves the committed position intact. A submitted command
+drains before the canceled call returns.
 
 ## Numerical checks
 
