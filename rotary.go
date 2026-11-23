@@ -40,42 +40,61 @@ func llama3Frequency(frequency float64, scaling RopeScaling) float64 {
 // rotaryTables builds adjacent-pair coefficients for consecutive absolute
 // positions. The signed sine table and a pair-swapping Gather rotate each pair.
 func rotaryTables(start, tokens int64, config Config) (*tensor.Tensor, *tensor.Tensor, error) {
+	var cosine, sine, err = rotaryCoefficients(start, tokens, config, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	var shape = []int64{tokens, 1, config.Dim / config.Heads}
+	var cosTensor *tensor.Tensor
+	if cosTensor, err = tensor.FromFloat32(shape, cosine); err != nil {
+		return nil, nil, err
+	}
+	var sinTensor *tensor.Tensor
+	if sinTensor, err = tensor.FromFloat32(shape, sine); err != nil {
+		return nil, nil, err
+	}
+	return cosTensor, sinTensor, nil
+}
+
+// Metal takes one coefficient per pair and applies the subtraction itself.
+// The host rotate path repeats cosine and uses opposite signs for the two
+// sine entries because it applies the coefficients to a pair-swapped tensor.
+func rotaryCoefficients(start, tokens int64, config Config, packed bool) (cosine, sine []float32, err error) {
 	if start < 0 || tokens <= 0 || start > math.MaxInt64-(tokens-1) {
 		return nil, nil, fmt.Errorf("llama: invalid rotary position range: start %d, count %d", start, tokens)
 	}
-	headWidth := config.Dim / config.Heads
-	shape := []int64{tokens, 1, headWidth}
-	elements, _, err := tensor.ValidateShape(shape, tensor.Float32)
-	if err != nil {
+	var width = config.Dim / config.Heads
+	if packed {
+		width /= 2
+	}
+	var elements int64
+	if elements, _, err = tensor.ValidateShape([]int64{tokens, width}, tensor.Float32); err != nil {
 		return nil, nil, err
 	}
-	frequencies, err := rotaryInverseFrequencies(config)
-	if err != nil {
+	var frequencies []float64
+	if frequencies, err = rotaryInverseFrequencies(config); err != nil {
 		return nil, nil, err
 	}
-	cosine, sine := make([]float32, elements), make([]float32, elements)
+	cosine, sine = make([]float32, elements), make([]float32, elements)
 	for row := range tokens {
-		position := start + row
+		var position = start + row
 		for pair, frequency := range frequencies {
-			angle := float64(position) * frequency
+			var angle = float64(position) * frequency
 			if !finite(angle) {
 				return nil, nil, fmt.Errorf("llama: nonfinite rotary angle at position %d pair %d", position, pair)
 			}
-			s, c := math.Sincos(angle)
-			offset := row*headWidth + int64(2*pair)
+			var s, c = math.Sincos(angle)
+			if packed {
+				var offset = row*width + int64(pair)
+				cosine[offset], sine[offset] = float32(c), float32(s)
+				continue
+			}
+			var offset = row*width + int64(2*pair)
 			cosine[offset], cosine[offset+1] = float32(c), float32(c)
 			sine[offset], sine[offset+1] = -float32(s), float32(s)
 		}
 	}
-	cosTensor, err := tensor.FromFloat32(shape, cosine)
-	if err != nil {
-		return nil, nil, err
-	}
-	sinTensor, err := tensor.FromFloat32(shape, sine)
-	if err != nil {
-		return nil, nil, err
-	}
-	return cosTensor, sinTensor, nil
+	return cosine, sine, nil
 }
 
 func rotate(input, cosine, sine *tensor.Tensor) (*tensor.Tensor, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/itsmontoya/neuralnetwork/gpu"
 	"github.com/itsmontoya/neuralnetwork/tensor"
 )
 
@@ -34,7 +35,8 @@ type Decoder struct {
 	config                  Config
 	embedding, norm, output *tensor.Tensor
 	blocks                  []blockWeights
-	metal                   *metalFFNModel
+	metal                   *metalModel
+	metalNorm               *gpu.Tensor
 }
 
 // Config returns the decoder's resolved configuration by value.
@@ -57,8 +59,9 @@ func (d *Decoder) ForwardContext(ctx context.Context, tokens []int64) (out *tens
 	return d.forward(ctx, tokens, nil)
 }
 
-// Close releases the resources of a Metal FFN decoder after active Metal
-// calls finish. It can be called repeatedly. CPU decoders need no cleanup.
+// Close waits for active Metal calls, then releases device weights and any
+// remaining session caches. It can be called repeatedly, including through
+// copies of the decoder handle. CPU decoders need no cleanup.
 func (d *Decoder) Close() (err error) {
 	if d == nil {
 		return nil
@@ -69,7 +72,8 @@ func (d *Decoder) Close() (err error) {
 // ForwardWithTrace also retains named intermediate tensors for conformance.
 // Every tensor is owned by this call; trace["logits"] is the returned logits.
 // No partial result or trace is returned on error. This diagnostic path retains
-// considerably more memory than Forward.
+// considerably more memory than Forward. Metal attention models return an
+// error because their fused attention operation does not expose probabilities.
 func (d *Decoder) ForwardWithTrace(tokens []int64) (*tensor.Tensor, map[string]*tensor.Tensor, error) {
 	trace := make(map[string]*tensor.Tensor)
 	logits, err := d.forward(context.Background(), tokens, trace)
@@ -97,6 +101,12 @@ func (d *Decoder) validatePrefix(tokens []int64) error {
 func (d *Decoder) forward(ctx context.Context, tokens []int64, trace map[string]*tensor.Tensor) (out *tensor.Tensor, err error) {
 	if err = d.validatePrefix(tokens); err != nil {
 		return nil, err
+	}
+	if d.metal != nil && d.metal.attention {
+		if trace != nil {
+			return nil, fmt.Errorf("llama: ForwardWithTrace requires attention probabilities, which Metal attention does not expose")
+		}
+		return d.forwardMetalPrefix(ctx, tokens)
 	}
 	x, err := d.forwardPrefix(ctx, tokens, trace, nil)
 	if err != nil {
@@ -153,6 +163,10 @@ func (d *Decoder) projectLogits(x *tensor.Tensor, trace map[string]*tensor.Tenso
 		return nil, fmt.Errorf("llama: final norm: %w", err)
 	}
 	record(trace, "hidden", hidden)
+	return d.classify(hidden, trace)
+}
+
+func (d *Decoder) classify(hidden *tensor.Tensor, trace map[string]*tensor.Tensor) (*tensor.Tensor, error) {
 	logits, err := project(hidden, d.output)
 	if err != nil {
 		return nil, fmt.Errorf("llama: output projection: %w", err)
