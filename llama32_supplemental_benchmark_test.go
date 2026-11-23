@@ -13,12 +13,28 @@ import (
 	"github.com/itsmontoya/llama/internal/tokenizer"
 )
 
+const llama32ShortPrompt = "The capital of France is"
+const llama32LongPrompt = "France is a country in Western Europe. It shares borders with Belgium, Germany, Switzerland, Italy, and Spain. The capital of France is"
+
 func BenchmarkLlama32SupplementalPrefill(b *testing.B) {
-	const prompt = "France is a country in Western Europe. It shares borders with Belgium, Germany, Switzerland, Italy, and Spain. The capital of France is"
-	model, ids := setupLlama32SupplementalBenchmark(b, prompt, 29)
+	benchmarkLlama32Prefill(b, 29, 12366)
+}
+
+func BenchmarkLlama32SupplementalPrefill27(b *testing.B) {
+	benchmarkLlama32Prefill(b, 27, 9822)
+}
+
+func BenchmarkLlama32SupplementalPrefill28(b *testing.B) {
+	benchmarkLlama32Prefill(b, 28, 374)
+}
+
+func benchmarkLlama32Prefill(b *testing.B, rows int, wantWinner int64) {
+	model, ids := setupLlama32SupplementalBenchmark(b, llama32LongPrompt, 29)
+	ids = ids[:rows]
 
 	var logits []float32
 	var winner int64
+	var prefill time.Duration
 	for b.Loop() {
 		b.StopTimer()
 		session, err := model.NewSession(int64(len(ids)))
@@ -26,6 +42,7 @@ func BenchmarkLlama32SupplementalPrefill(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.StartTimer()
+		start := time.Now()
 		logits, err = session.Prefill(ids)
 		if err != nil {
 			b.Fatal(err)
@@ -34,18 +51,19 @@ func BenchmarkLlama32SupplementalPrefill(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		prefill += time.Since(start)
 	}
-	if winner != 12366 {
-		b.Fatalf("greedy token = %d, want 12366", winner)
+	if winner != wantWinner {
+		b.Fatalf("greedy token = %d, want %d", winner, wantWinner)
 	}
+	b.ReportMetric(prefill.Seconds()/float64(b.N), "prefill-s/op")
 	b.Logf("greedy=%d FP32 logits SHA256=%x", winner, llama32LogitDigest(logits))
 }
 
 func BenchmarkLlama32SustainedDecode(b *testing.B) {
-	const prompt = "The capital of France is"
 	const window = 8
 	const steps = 4 * window
-	model, ids := setupLlama32SupplementalBenchmark(b, prompt, 6)
+	model, ids := setupLlama32SupplementalBenchmark(b, llama32ShortPrompt, 6)
 	capacity := int64(len(ids) + steps)
 
 	var logits []float32
@@ -97,9 +115,27 @@ func BenchmarkLlama32SustainedDecode(b *testing.B) {
 }
 
 func BenchmarkLlama32ConcurrentSustainedDecode(b *testing.B) {
-	const prompt = "The capital of France is"
+	benchmarkLlama32ConcurrentSustainedDecode(b, false)
+}
+
+func BenchmarkLlama32IndependentSustainedDecode(b *testing.B) {
+	benchmarkLlama32ConcurrentSustainedDecode(b, true)
+}
+
+func benchmarkLlama32ConcurrentSustainedDecode(b *testing.B, independent bool) {
 	const callers, steps = 2, 32
-	model, ids := setupLlama32SupplementalBenchmark(b, prompt, 6)
+	model, ids := setupLlama32SupplementalBenchmark(b, llama32ShortPrompt, 6)
+	models := [callers]*Decoder{model, model}
+	if independent {
+		var err error
+		models[1], _, err = LoadHFModel(os.Getenv("LLAMA_32_1B_MODEL_DIR"), 512)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if models[0].embedding == models[1].embedding {
+			b.Fatal("independent decoders share embedding storage")
+		}
+	}
 	capacity := int64(len(ids) + steps)
 	type result struct {
 		logits []float32
@@ -114,7 +150,7 @@ func BenchmarkLlama32ConcurrentSustainedDecode(b *testing.B) {
 		b.StopTimer()
 		var sessions [callers]*Session
 		for i := range sessions {
-			session, err := model.NewSession(capacity)
+			session, err := models[i].NewSession(capacity)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -180,6 +216,47 @@ func BenchmarkLlama32ConcurrentSustainedDecode(b *testing.B) {
 	b.ReportMetric(sessionTime[1].Seconds()/tokens, "session1-s/token")
 	b.Logf("callers=%d decode steps per session=%d positions=%d..%d", callers, steps, len(ids), capacity-1)
 	b.Logf("suffix=%v final FP32 logits SHA256=%x", results[0].suffix, llama32LogitDigest(results[0].logits))
+}
+
+func BenchmarkLlama32ConcurrentPrefill(b *testing.B) {
+	const callers = 2
+	model, ids := setupLlama32SupplementalBenchmark(b, llama32ShortPrompt, 6)
+	var baseline []float32
+	var rows [callers][]float32
+	for b.Loop() {
+		b.StopTimer()
+		var sessions [callers]*Session
+		for i := range sessions {
+			session, err := model.NewSession(int64(len(ids)))
+			if err != nil {
+				b.Fatal(err)
+			}
+			sessions[i] = session
+		}
+		b.StartTimer()
+		var group sync.WaitGroup
+		var errs [callers]error
+		for i, session := range sessions {
+			group.Go(func() { rows[i], errs[i] = session.Prefill(ids) })
+		}
+		group.Wait()
+		b.StopTimer()
+		for _, err := range errs {
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		if !slices.Equal(rows[0], rows[1]) {
+			b.Fatal("concurrent prefill sessions disagree")
+		}
+		if baseline == nil {
+			baseline = rows[0]
+		} else if !slices.Equal(rows[0], baseline) {
+			b.Fatal("concurrent prefill differs from retained first result")
+		}
+		b.StartTimer()
+	}
+	b.Logf("callers=%d prefill SHA256=%x", callers, llama32LogitDigest(rows[0]))
 }
 
 func llama32LogitDigest(logits []float32) [sha256.Size]byte {
