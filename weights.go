@@ -77,7 +77,7 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 	vocabShape := []int64{c.VocabSize, c.Dim}
 	normShape := []int64{c.Dim}
 	for _, weight := range []decoderWeight{
-		{name: "token_embedding", shape: vocabShape, values: w.TokenEmbedding, target: &d.embedding},
+		{name: "token_embedding", shape: vocabShape, values: w.TokenEmbedding, target: &d.embedding, metal: &d.metalEmbedding},
 		{name: "final_norm", shape: normShape, values: w.FinalNorm, target: &d.norm, metal: &d.metalNorm},
 	} {
 		if err := visit(-1, weight); err != nil {
@@ -85,7 +85,7 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 		}
 	}
 	if !c.TieEmbeddings {
-		if err := visit(-1, decoderWeight{name: "output", shape: vocabShape, values: w.Output, target: &d.output}); err != nil {
+		if err := visit(-1, decoderWeight{name: "output", shape: vocabShape, values: w.Output, target: &d.output, metal: &d.metalOutput}); err != nil {
 			return err
 		}
 	}
@@ -133,6 +133,8 @@ func (d *Decoder) loadWeights(ctx context.Context, w Weights, read func(layer in
 	}
 	if d.config.TieEmbeddings {
 		d.output = d.embedding
+		// The classifier borrows the embedding allocation owned by metalModel.
+		d.metalOutput = d.metalEmbedding
 	}
 	return nil
 }

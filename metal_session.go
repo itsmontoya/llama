@@ -98,12 +98,11 @@ func (s *Session) runMetalStep(ctx context.Context, tokens []int64, prefill bool
 
 	var updates = make([]*gpu.KVAppend, len(state.caches))
 	defer discardMetalAppends(updates)
-	var logits *tensor.Tensor
-	if logits, err = d.metalLogits(ctx, tokens, state.position, state.caches, updates, true); err != nil {
+	if out, err = d.metalLogits(ctx, tokens, state.position, state.caches, updates, true); err != nil {
 		return nil, err
 	}
 	var next = state.position + int64(len(tokens))
-	if out, err = sessionLogits(ctx, logits, next); err != nil {
+	if err = validateSessionLogits(ctx, out, next); err != nil {
 		return nil, err
 	}
 
