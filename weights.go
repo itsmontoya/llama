@@ -38,6 +38,7 @@ type blockWeights struct {
 	ffnNorm                       *tensor.Tensor
 	gate, up, down                *tensor.PreparedRightTranspose
 	metal                         metalFFNWeights
+	metalAttention                metalAttentionWeights
 }
 
 type decoderWeight struct {
@@ -49,14 +50,14 @@ type decoderWeight struct {
 	metal    **gpu.Tensor
 }
 
-func (w decoderWeight) store(name string, values []float32, model *metalFFNModel) (err error) {
+func (w decoderWeight) store(name string, values []float32, model *metalModel) (err error) {
 	for index, value := range values {
 		if !finite(float64(value)) {
 			return fmt.Errorf("llama: %s contains nonfinite value at %d", name, index)
 		}
 	}
 	switch {
-	case w.metal != nil && model != nil:
+	case w.metal != nil && model != nil && (model.attention || w.prepared != nil):
 		*w.metal, err = model.upload(w.shape, values)
 	case w.prepared != nil:
 		*w.prepared, err = tensor.PrepareRightTranspose(w.shape, values)
@@ -77,7 +78,7 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 	normShape := []int64{c.Dim}
 	for _, weight := range []decoderWeight{
 		{name: "token_embedding", shape: vocabShape, values: w.TokenEmbedding, target: &d.embedding},
-		{name: "final_norm", shape: normShape, values: w.FinalNorm, target: &d.norm},
+		{name: "final_norm", shape: normShape, values: w.FinalNorm, target: &d.norm, metal: &d.metalNorm},
 	} {
 		if err := visit(-1, weight); err != nil {
 			return err
@@ -99,12 +100,12 @@ func (d *Decoder) visitWeights(w Weights, visit func(layer int, weight decoderWe
 			source = w.Layers[layer]
 		}
 		for _, weight := range []decoderWeight{
-			{name: "attention_norm", shape: normShape, values: source.AttentionNorm, target: &block.attentionNorm},
-			{name: "wq", shape: qShape, values: source.WQ, target: &block.wq},
-			{name: "wk", shape: kvShape, values: source.WK, target: &block.wk},
-			{name: "wv", shape: kvShape, values: source.WV, target: &block.wv},
-			{name: "wo", shape: []int64{c.Dim, c.Dim}, values: source.WO, target: &block.wo},
-			{name: "ffn_norm", shape: normShape, values: source.FFNNorm, target: &block.ffnNorm},
+			{name: "attention_norm", shape: normShape, values: source.AttentionNorm, target: &block.attentionNorm, metal: &block.metalAttention.attentionNorm},
+			{name: "wq", shape: qShape, values: source.WQ, target: &block.wq, metal: &block.metalAttention.q},
+			{name: "wk", shape: kvShape, values: source.WK, target: &block.wk, metal: &block.metalAttention.k},
+			{name: "wv", shape: kvShape, values: source.WV, target: &block.wv, metal: &block.metalAttention.v},
+			{name: "wo", shape: []int64{c.Dim, c.Dim}, values: source.WO, target: &block.wo, metal: &block.metalAttention.o},
+			{name: "ffn_norm", shape: normShape, values: source.FFNNorm, target: &block.ffnNorm, metal: &block.metalAttention.ffnNorm},
 			{name: "w_gate", shape: upShape, values: source.WGate, prepared: &block.gate, metal: &block.metal.gate},
 			{name: "w_up", shape: upShape, values: source.WUp, prepared: &block.up, metal: &block.metal.up},
 			{name: "w_down", shape: downShape, values: source.WDown, prepared: &block.down, metal: &block.metal.down},

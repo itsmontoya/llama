@@ -10,14 +10,16 @@ import (
 
 // Session holds bounded, batch-one FP32 history for a single prompt and its
 // continuation. Separate sessions can use the same decoder concurrently.
-// A session must not be copied, and its callers must synchronize any concurrent
-// use of that session. Use Decoder.NewSession to construct one.
+// Callers must synchronize concurrent use of a CPU or FFN-only session and
+// must not copy it. Metal attention session handles share their serialized
+// state on copy. Use Decoder.NewSession to construct one.
 type Session struct {
 	decoder  *Decoder
 	capacity int64
 	position int64
 	layers   []layerCache
 	scores   []float32
+	metal    *metalSession
 }
 
 // Each plane stores [position, KV head, head width]. Keys have already been
@@ -27,7 +29,8 @@ type layerCache struct {
 }
 
 // NewSession allocates space for capacity tokens, including the prompt.
-// Capacity must be in [1, Config().MaxContext].
+// Capacity must be in [1, Config().MaxContext]. For Metal attention, Close
+// releases the device history when the session is no longer needed.
 func (d *Decoder) NewSession(capacity int64) (*Session, error) {
 	if d == nil || d.embedding == nil {
 		return nil, fmt.Errorf("llama: decoder is uninitialized")
@@ -35,6 +38,13 @@ func (d *Decoder) NewSession(capacity int64) (*Session, error) {
 	c := d.config
 	if capacity <= 0 || capacity > c.MaxContext {
 		return nil, fmt.Errorf("llama: session capacity must be in [1,%d], got %d", c.MaxContext, capacity)
+	}
+	if d.metal != nil && d.metal.attention {
+		var state, err = d.metal.newSession(c, capacity)
+		if err != nil {
+			return nil, err
+		}
+		return &Session{decoder: d, capacity: capacity, metal: state}, nil
 	}
 	headWidth := c.Dim / c.Heads
 	elements, _, err := tensor.ValidateShape([]int64{2, c.Layers, capacity, c.KVHeads, headWidth}, tensor.Float32)
@@ -55,12 +65,38 @@ func (d *Decoder) NewSession(capacity int64) (*Session, error) {
 // Position returns the number of committed tokens and the absolute position
 // of the next token. A failed call leaves Position and existing history intact.
 func (s *Session) Position() int64 {
+	if s.metal != nil {
+		s.metal.mu.Lock()
+		defer s.metal.mu.Unlock()
+		return s.metal.position
+	}
 	return s.position
 }
 
+// Close releases a Metal attention session's cache after its active step
+// finishes. Close is idempotent. CPU and FFN-only sessions need no cleanup.
+func (s *Session) Close() (err error) {
+	if s == nil || s.metal == nil {
+		return nil
+	}
+	var model = s.decoder.metal
+	model.mu.RLock()
+	defer model.mu.RUnlock()
+	s.metal.close()
+	model.sessionsMu.Lock()
+	defer model.sessionsMu.Unlock()
+	delete(model.sessions, s.metal)
+	return nil
+}
+
 // Reset discards the logical history so the session can prefill another
-// prompt. Neither reset nor later steps modify earlier returned logits.
+// prompt. Earlier returned logits stay valid. Reset has no effect on a
+// closed Metal attention session.
 func (s *Session) Reset() {
+	if s.metal != nil {
+		s.metal.reset()
+		return
+	}
 	s.position = 0
 }
 
@@ -78,13 +114,10 @@ func (s *Session) PrefillContext(ctx context.Context, tokens []int64) (out []flo
 	if s == nil || s.decoder == nil {
 		return nil, fmt.Errorf("llama: session is uninitialized")
 	}
-	if s.position != 0 {
-		return nil, fmt.Errorf("llama: prefill requires an empty session")
+	if s.metal != nil {
+		return s.runMetalStep(ctx, tokens, true)
 	}
-	if int64(len(tokens)) > s.capacity {
-		return nil, fmt.Errorf("llama: prompt length %d exceeds session capacity %d", len(tokens), s.capacity)
-	}
-	if err = s.decoder.validatePrefix(tokens); err != nil {
+	if err = s.validatePrefill(tokens, s.position); err != nil {
 		return nil, err
 	}
 	x, err := s.decoder.forwardPrefix(ctx, tokens, nil, func(layer int, k, v *tensor.Tensor) error {
@@ -115,16 +148,13 @@ func (s *Session) DecodeContext(ctx context.Context, token int64) (out []float32
 	if s == nil || s.decoder == nil {
 		return nil, fmt.Errorf("llama: session is uninitialized")
 	}
-	if s.position == 0 {
-		return nil, fmt.Errorf("llama: decode requires a prefilled session")
+	if s.metal != nil {
+		return s.runMetalStep(ctx, []int64{token}, false)
 	}
-	if s.position == s.capacity {
-		return nil, fmt.Errorf("llama: session has reached capacity %d", s.capacity)
+	if err = s.validateDecode(token, s.position); err != nil {
+		return nil, err
 	}
-	d := s.decoder
-	if token < 0 || token >= d.config.VocabSize {
-		return nil, fmt.Errorf("llama: token at position %d is out of range: %d", s.position, token)
-	}
+	var d = s.decoder
 	var scratch *metalFFNScratch
 	if scratch, err = d.metal.begin(ctx, d.config, 1); err != nil {
 		return nil, err
@@ -154,6 +184,29 @@ func (s *Session) DecodeContext(ctx context.Context, token int64) (out []float32
 	return s.commit(ctx, x, next)
 }
 
+func (s *Session) validatePrefill(tokens []int64, position int64) (err error) {
+	if position != 0 {
+		return fmt.Errorf("llama: prefill requires an empty session")
+	}
+	if int64(len(tokens)) > s.capacity {
+		return fmt.Errorf("llama: prompt length %d exceeds session capacity %d", len(tokens), s.capacity)
+	}
+	return s.decoder.validatePrefix(tokens)
+}
+
+func (s *Session) validateDecode(token, position int64) (err error) {
+	if position == 0 {
+		return fmt.Errorf("llama: decode requires a prefilled session")
+	}
+	if position == s.capacity {
+		return fmt.Errorf("llama: session has reached capacity %d", s.capacity)
+	}
+	if token < 0 || token >= s.decoder.config.VocabSize {
+		return fmt.Errorf("llama: token at position %d is out of range: %d", position, token)
+	}
+	return nil
+}
+
 func (s *Session) storeKV(layer int, position int64, k, v *tensor.Tensor) error {
 	keys, err := k.Float32Values()
 	if err != nil {
@@ -175,9 +228,18 @@ func (s *Session) commit(ctx context.Context, x *tensor.Tensor, next int64) (out
 	if err != nil {
 		return nil, err
 	}
-	values, err := logits.Float32Values()
-	if err != nil {
-		return nil, fmt.Errorf("llama: read session logits: %w", err)
+	var values []float32
+	if values, err = sessionLogits(ctx, logits, next); err != nil {
+		return nil, err
+	}
+	s.position = next
+	return values, nil
+}
+
+func sessionLogits(ctx context.Context, logits *tensor.Tensor, next int64) (out []float32, err error) {
+	var values, readErr = logits.Float32Values()
+	if readErr != nil {
+		return nil, fmt.Errorf("llama: read session logits: %w", readErr)
 	}
 	for id, value := range values {
 		if !finite(float64(value)) {
@@ -187,7 +249,6 @@ func (s *Session) commit(ctx context.Context, x *tensor.Tensor, next int64) (out
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.position = next
 	return values, nil
 }
 

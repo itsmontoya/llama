@@ -9,7 +9,8 @@ import (
 	"github.com/itsmontoya/neuralnetwork/gpu"
 )
 
-func TestLlama32MetalGeneration(t *testing.T) {
+func requireMetalGenerationDevice(t *testing.T) {
+	t.Helper()
 	device, err := gpu.OpenDefault()
 	if errors.Is(err, gpu.ErrUnavailable) {
 		t.Skip(err)
@@ -20,5 +21,14 @@ func TestLlama32MetalGeneration(t *testing.T) {
 	if err = device.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestLlama32MetalGeneration(t *testing.T) {
+	requireMetalGenerationDevice(t)
 	checkLlama32Generation(t, []string{"-ffn-backend", "metal"})
+}
+
+func TestLlama32MetalAttentionGeneration(t *testing.T) {
+	requireMetalGenerationDevice(t)
+	checkLlama32Generation(t, []string{"-ffn-backend", "metal", "-attention-backend", "metal"})
 }

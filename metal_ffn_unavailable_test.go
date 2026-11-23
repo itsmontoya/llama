@@ -16,3 +16,10 @@ func TestLoadHFModelMetalUnavailable(t *testing.T) {
 		t.Fatalf("got decoder %v and error %v, want a Metal availability error", decoder, err)
 	}
 }
+
+func TestLoadHFModelMetalAttentionUnavailable(t *testing.T) {
+	var decoder, _, err = LoadHFModelMetalAttention(t.Context(), t.TempDir(), 8)
+	if decoder != nil || !errors.Is(err, gpu.ErrUnavailable) {
+		t.Fatalf("got decoder %v and error %v, want a Metal availability error", decoder, err)
+	}
+}

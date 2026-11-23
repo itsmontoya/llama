@@ -16,7 +16,11 @@ func TestLlama32Metal(t *testing.T) {
 		t.Skip("set LLAMA_32_1B_MODEL_DIR to the pinned Meta snapshot")
 	}
 	verifyLlama32Snapshot(t, dir)
-	var decoder = loadTestMetalModel(t, dir, 512)
+	checkLlama32Metal(t, loadTestMetalModel(t, dir, 512))
+}
+
+func checkLlama32Metal(t *testing.T, decoder *Decoder) {
+	t.Helper()
 	t.Run("frozen_logits", func(t *testing.T) {
 		checkLlama32Logits(t, decoder)
 	})
@@ -40,6 +44,7 @@ func TestLlama32Metal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer session.Close()
 		var row []float32
 		if row, err = session.Prefill(generation.PromptIDs); err != nil {
 			t.Fatal(err)
@@ -79,6 +84,7 @@ func TestLlama32Metal(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				defer session.Close()
 				var row []float32
 				if row, err = session.Prefill(prefix); err != nil {
 					t.Fatal(err)
@@ -90,11 +96,11 @@ func TestLlama32Metal(t *testing.T) {
 	})
 
 	t.Run("independent_sessions", func(t *testing.T) {
-		checkConcurrentMetalSessions(t, decoder, generation.PromptIDs, generation.SuffixIDs)
+		checkConcurrentMetalSessions(t, [2]*Decoder{decoder, decoder}, generation.PromptIDs, generation.SuffixIDs)
 	})
 }
 
-func checkConcurrentMetalSessions(t *testing.T, decoder *Decoder, prompt, suffix []int64) {
+func checkConcurrentMetalSessions(t *testing.T, decoders [2]*Decoder, prompt, suffix []int64) {
 	t.Helper()
 	type result struct {
 		session            *Session
@@ -114,7 +120,7 @@ func checkConcurrentMetalSessions(t *testing.T, decoder *Decoder, prompt, suffix
 			defer func() { done <- struct{}{} }()
 			<-start
 			var current = &results[i]
-			current.session, current.err = decoder.NewSession(int64(len(prompt) + 1))
+			current.session, current.err = decoders[i].NewSession(int64(len(prompt) + 1))
 			if current.err != nil {
 				return
 			}
@@ -129,6 +135,9 @@ func checkConcurrentMetalSessions(t *testing.T, decoder *Decoder, prompt, suffix
 	for range results {
 		<-done
 	}
+	for _, current := range results {
+		defer current.session.Close()
+	}
 	for i, current := range results {
 		if current.err != nil {
 			t.Fatalf("session %d: %v", i, current.err)
@@ -136,8 +145,8 @@ func checkConcurrentMetalSessions(t *testing.T, decoder *Decoder, prompt, suffix
 		if current.session.Position() != int64(len(prompt)+1) {
 			t.Fatalf("session %d committed %d positions", i, current.session.Position())
 		}
-		compareCachedRow(t, decoder, inputs[i], current.prefilled)
-		compareCachedRow(t, decoder, append(inputs[i], suffix[i]), current.decoded)
+		compareCachedRow(t, decoders[i], inputs[i], current.prefilled)
+		compareCachedRow(t, decoders[i], append(inputs[i], suffix[i]), current.decoded)
 	}
 	if slices.Equal(results[0].decoded, results[1].decoded) {
 		t.Fatal("distinct inputs produced identical session outputs")
@@ -145,5 +154,5 @@ func checkConcurrentMetalSessions(t *testing.T, decoder *Decoder, prompt, suffix
 }
 
 func BenchmarkLlama32MetalCachedGeneration(b *testing.B) {
-	benchmarkLlama32CachedGeneration(b, true)
+	benchmarkLlama32CachedGeneration(b, LoadHFModelMetal)
 }

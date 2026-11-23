@@ -274,3 +274,31 @@ the same reference environment used above:
 "$reference_python" -B testdata/generate_llama32_unicode.py |
   cmp - internal/tokenizer/llama3_unicode.go
 ```
+
+
+## Experimental Metal attention parity
+
+The same immutable snapshot and tolerances apply to device attention,
+RoPE and KV. These tests compare frozen logits and greedy IDs, cached and
+full-prefix execution, the 27/28/29-row prefill tails, and sustained decode at
+positions 6–37. Separate synthetic fixtures cover MHA, GQA, MQA, scoped
+cancellation, transactional retry and resource cleanup.
+
+```sh
+export LLAMA_32_1B_MODEL_DIR="$model_dir"
+GOWORK=off CGO_ENABLED=1 go test -p 1 -count=1 -v -tags=metal \
+  -run '^Test(MetalAttention|Llama32MetalAttention)' . ./cmd/generate
+```
+
+Use the following benchmarks in separate fresh processes, alternating
+the order. The untagged CPU and the tagged FFN-only modes provide separate
+controls. The Metal option leaves the ordinary tensor classifier active,
+which can dispatch to Metal with fresh operand copies in a tagged build.
+
+```sh
+GOWORK=off CGO_ENABLED=1 go test -c -o "$bin_dir/llama-cpu.test" .
+GOWORK=off CGO_ENABLED=1 go test -c -tags=metal -o "$bin_dir/llama-metal.test" .
+"$bin_dir/llama-cpu.test" -test.run '^$' -test.bench '^BenchmarkLlama32CachedGeneration$' -test.benchtime=1x -test.benchmem -test.v
+"$bin_dir/llama-metal.test" -test.run '^$' -test.bench '^BenchmarkLlama32MetalCachedGeneration$' -test.benchtime=1x -test.benchmem -test.v
+"$bin_dir/llama-metal.test" -test.run '^$' -test.bench '^BenchmarkLlama32MetalAttentionCachedGeneration$' -test.benchtime=1x -test.benchmem -test.v
+```

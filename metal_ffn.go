@@ -4,34 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/itsmontoya/neuralnetwork/gpu"
 	"github.com/itsmontoya/neuralnetwork/tensor"
 )
 
-// metalFFNModel owns a logical device and its immutable projection weights.
-// The read lock pins the model through one call's use and release of scratch.
-type metalFFNModel struct {
-	mu      sync.RWMutex
-	device  *gpu.Device
-	weights []*gpu.Tensor
-	closed  bool
-}
-
-func (m *metalFFNModel) upload(shape []int64, values []float32) (out *gpu.Tensor, err error) {
-	var weight *gpu.Tensor
-	if weight, err = m.device.NewFloat32(shape); err != nil {
-		return nil, err
-	}
-	if err = weight.Upload(values); err != nil {
-		return nil, errors.Join(err, weight.Close())
-	}
-	m.weights = append(m.weights, weight)
-	return weight, nil
-}
-
-func (m *metalFFNModel) begin(ctx context.Context, config Config, rows int64) (scratch *metalFFNScratch, err error) {
+func (m *metalModel) begin(ctx context.Context, config Config, rows int64) (scratch *metalFFNScratch, err error) {
 	if err = ctx.Err(); err != nil || m == nil {
 		return nil, err
 	}
@@ -47,25 +25,11 @@ func (m *metalFFNModel) begin(ctx context.Context, config Config, rows int64) (s
 	return scratch, nil
 }
 
-func (m *metalFFNModel) close() (err error) {
-	if m == nil {
-		return nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.closed = true
-	for _, weight := range m.weights {
-		err = errors.Join(err, weight.Close())
-	}
-	m.weights = nil
-	return errors.Join(err, m.device.Close())
-}
-
 type metalFFNWeights struct {
 	gate, up, down *gpu.Tensor
 }
 
-func newMetalFFNScratch(model *metalFFNModel, rows, dim, ffnDim int64) (out *metalFFNScratch, err error) {
+func newMetalFFNScratch(model *metalModel, rows, dim, ffnDim int64) (out *metalFFNScratch, err error) {
 	var scratch metalFFNScratch
 	scratch.model = model
 	scratch.shape = []int64{rows, dim}
@@ -92,10 +56,11 @@ func newMetalFFNScratch(model *metalFFNModel, rows, dim, ffnDim int64) (out *met
 // metalFFNScratch belongs to one prefix or decode call and is reused by that
 // call's layers. Releasing it bounds GPU retention independently of KV capacity.
 type metalFFNScratch struct {
-	model                              *metalFFNModel
-	input, gate, up, activated, output *gpu.Tensor
-	shape                              []int64
-	hostOutput                         []float32
+	model *metalModel
+	input *gpu.Tensor
+	metalFFNActivations
+	shape      []int64
+	hostOutput []float32
 }
 
 func (s *metalFFNScratch) close() {
@@ -149,22 +114,30 @@ func (s *metalFFNScratch) execute(ctx context.Context, weights metalFFNWeights) 
 			err = errors.Join(err, closeErr)
 		}
 	}()
-	if err = scope.MatMulRightTranspose(s.input, weights.gate, s.gate); err != nil {
-		return err
-	}
-	if err = scope.MatMulRightTranspose(s.input, weights.up, s.up); err != nil {
-		return err
-	}
-	if err = scope.SwiGLU(s.gate, s.up, s.activated); err != nil {
-		return err
-	}
-	if err = scope.MatMulRightTranspose(s.activated, weights.down, s.output); err != nil {
+	if err = s.metalFFNActivations.encode(scope, s.input, weights); err != nil {
 		return err
 	}
 	if err = scope.Submit(ctx); err != nil {
 		return err
 	}
 	return scope.Wait(ctx)
+}
+
+type metalFFNActivations struct {
+	gate, up, activated, output *gpu.Tensor
+}
+
+func (s metalFFNActivations) encode(scope *gpu.Scope, input *gpu.Tensor, weights metalFFNWeights) (err error) {
+	if err = scope.MatMulRightTranspose(input, weights.gate, s.gate); err != nil {
+		return err
+	}
+	if err = scope.MatMulRightTranspose(input, weights.up, s.up); err != nil {
+		return err
+	}
+	if err = scope.SwiGLU(s.gate, s.up, s.activated); err != nil {
+		return err
+	}
+	return scope.MatMulRightTranspose(s.activated, weights.down, s.output)
 }
 
 func (s *metalFFNScratch) recordTrace(trace map[string]*tensor.Tensor, prefix string) (err error) {

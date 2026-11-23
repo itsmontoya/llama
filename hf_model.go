@@ -30,16 +30,33 @@ func LoadHFModel(dir string, maxContext int64) (*Decoder, HFGenerationConfig, er
 // The context controls loading, including cleanup after a canceled upload
 // boundary. Unavailable builds or devices return an error wrapping
 // gpu.ErrUnavailable.
-func LoadHFModelMetal(ctx context.Context, dir string, maxContext int64) (decoder *Decoder, generation HFGenerationConfig, err error) {
+func LoadHFModelMetal(ctx context.Context, dir string, maxContext int64) (*Decoder, HFGenerationConfig, error) {
+	return loadHFModelMetal(ctx, dir, maxContext, false)
+}
+
+// LoadHFModelMetalAttention loads a Hugging Face model with attention, RoPE,
+// residuals, normalization and FFN on one Metal device. Embedding lookup and
+// classification use the regular tensor path. Each session keeps its own
+// device KV cache. Call Decoder.Close to release all model and session resources.
+// The context controls loading. Unavailable builds or devices return an error
+// wrapping gpu.ErrUnavailable.
+func LoadHFModelMetalAttention(ctx context.Context, dir string, maxContext int64) (decoder *Decoder, generation HFGenerationConfig, err error) {
+	return loadHFModelMetal(ctx, dir, maxContext, true)
+}
+
+func loadHFModelMetal(ctx context.Context, dir string, maxContext int64, attention bool) (decoder *Decoder, generation HFGenerationConfig, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, HFGenerationConfig{}, err
 	}
 	var device *gpu.Device
 	if device, err = gpu.OpenDefault(); err != nil {
-		return nil, HFGenerationConfig{}, fmt.Errorf("llama: Metal FFN requires a Metal device on darwin/arm64 and a cgo build with -tags=metal (without purego): %w", err)
+		var operation = "FFN"
+		if attention {
+			operation = "attention"
+		}
+		return nil, HFGenerationConfig{}, fmt.Errorf("llama: Metal %s requires a Metal device on darwin/arm64 and a cgo build with -tags=metal (without purego): %w", operation, err)
 	}
-	var model metalFFNModel
-	model.device = device
+	var model = metalModel{device: device, attention: attention}
 	decoder, generation, err = loadHFModel(ctx, dir, maxContext, &model)
 	if err != nil {
 		if closeErr := model.close(); closeErr != nil {
@@ -50,7 +67,7 @@ func LoadHFModelMetal(ctx context.Context, dir string, maxContext int64) (decode
 	return decoder, generation, nil
 }
 
-func loadHFModel(ctx context.Context, dir string, maxContext int64, metal *metalFFNModel) (decoder *Decoder, generation HFGenerationConfig, err error) {
+func loadHFModel(ctx context.Context, dir string, maxContext int64, metal *metalModel) (decoder *Decoder, generation HFGenerationConfig, err error) {
 	checkpoint, err := openHFCheckpoint(dir)
 	if err != nil {
 		return nil, HFGenerationConfig{}, err
@@ -90,7 +107,7 @@ func openHFCheckpoint(dir string) (*safetensors.File, error) {
 	return nil, err
 }
 
-func loadHFCheckpoint(ctx context.Context, config Config, checkpoint *safetensors.File, metal *metalFFNModel) (out *Decoder, err error) {
+func loadHFCheckpoint(ctx context.Context, config Config, checkpoint *safetensors.File, metal *metalModel) (out *Decoder, err error) {
 	inventory := checkpoint.Tensors()
 	// Bound the layout allocation by the available descriptors before walking
 	// dimensions derived from the configuration.
@@ -117,6 +134,11 @@ func loadHFCheckpoint(ctx context.Context, config Config, checkpoint *safetensor
 		return name, values, nil
 	}); err != nil {
 		return nil, err
+	}
+	if metal != nil && metal.attention {
+		if err = metal.loadRotary(ctx, config); err != nil {
+			return nil, err
+		}
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err

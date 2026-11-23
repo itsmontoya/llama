@@ -59,6 +59,7 @@ func (d *Decoder) GenerateGreedyCached(prompt []int64, maxNewTokens int, stopIDs
 	if err != nil {
 		return nil, err
 	}
+	defer session.Close()
 	row, err := session.Prefill(prompt)
 	if err != nil {
 		return nil, fmt.Errorf("llama: generate token 1: %w", err)
