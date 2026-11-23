@@ -45,6 +45,15 @@ func TestLlama32Logits(t *testing.T) {
 		t.Skip("set LLAMA_32_1B_MODEL_DIR to the pinned Meta snapshot")
 	}
 	verifyLlama32Snapshot(t, dir)
+	decoder, _, err := LoadHFModel(dir, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkLlama32Logits(t, decoder)
+}
+
+func checkLlama32Logits(t *testing.T, decoder *Decoder) {
+	t.Helper()
 	var reference struct {
 		Revision   string `json:"revision"`
 		Schema     int    `json:"schema_version"`
@@ -62,10 +71,6 @@ func TestLlama32Logits(t *testing.T) {
 	}
 	if reference.Revision != llama32Revision || reference.Schema != 1 || len(reference.LogitCases) < 2 || len(reference.Generation.Steps) == 0 {
 		t.Fatal("invalid pinned Llama 3.2 reference coverage")
-	}
-	decoder, _, err := LoadHFModel(dir, 512)
-	if err != nil {
-		t.Fatal(err)
 	}
 	vocab := int(decoder.Config().VocabSize)
 	var maxError, maxFraction llama32LogitDiscrepancy

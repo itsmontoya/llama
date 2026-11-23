@@ -15,6 +15,11 @@ import (
 const llama32Revision = "4e20de362430cd3b72f300e6b0f18e50e7166e08"
 
 func TestLlama32Generation(t *testing.T) {
+	checkLlama32Generation(t, nil)
+}
+
+func checkLlama32Generation(t *testing.T, backendArgs []string) {
+	t.Helper()
 	dir := os.Getenv("LLAMA_32_1B_MODEL_DIR")
 	if dir == "" {
 		t.Skip("set LLAMA_32_1B_MODEL_DIR to the pinned Meta snapshot")
@@ -42,6 +47,7 @@ func TestLlama32Generation(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"-hf-model-dir", dir, "-context", "512", "-prompt", want.Prompt, "-max-new-tokens", strconv.Itoa(want.MaxNewTokens)}
+	args = append(args, backendArgs...)
 	for _, mode := range []struct {
 		name  string
 		extra []string

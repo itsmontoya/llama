@@ -2,6 +2,7 @@ package llama
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,9 +11,15 @@ import (
 	"time"
 
 	"github.com/itsmontoya/llama/internal/tokenizer"
+	"github.com/itsmontoya/neuralnetwork/gpu"
 )
 
 func BenchmarkLlama32CachedGeneration(b *testing.B) {
+	benchmarkLlama32CachedGeneration(b, false)
+}
+
+func benchmarkLlama32CachedGeneration(b *testing.B, metalFFN bool) {
+	b.Helper()
 	dir := os.Getenv("LLAMA_32_1B_MODEL_DIR")
 	if dir == "" {
 		b.Skip("set LLAMA_32_1B_MODEL_DIR to the pinned Meta snapshot")
@@ -38,12 +45,29 @@ func BenchmarkLlama32CachedGeneration(b *testing.B) {
 	}
 
 	const contextCap = 512
-	start := time.Now()
-	decoder, settings, err := LoadHFModel(dir, contextCap)
+	var (
+		decoder  *Decoder
+		settings HFGenerationConfig
+		err      error
+		start    = time.Now()
+	)
+	if metalFFN {
+		decoder, settings, err = LoadHFModelMetal(b.Context(), dir, contextCap)
+	} else {
+		decoder, settings, err = LoadHFModel(dir, contextCap)
+	}
 	modelLoad := time.Since(start)
+	if errors.Is(err, gpu.ErrUnavailable) {
+		b.Skip(err)
+	}
 	if err != nil {
 		b.Fatal(err)
 	}
+	b.Cleanup(func() {
+		if closeErr := decoder.Close(); closeErr != nil {
+			b.Error(closeErr)
+		}
+	})
 	config := decoder.Config()
 	start = time.Now()
 	vocab, err := tokenizer.LoadLlama3(dir, config.VocabSize, settings.BOSID, settings.StopIDs)
@@ -67,32 +91,32 @@ func BenchmarkLlama32CachedGeneration(b *testing.B) {
 	var cacheSetup, prefill, firstToken, decode time.Duration
 	for b.Loop() {
 		start = time.Now()
-		session, err := decoder.NewSession(capacity)
+		session, sessionErr := decoder.NewSession(capacity)
 		cacheSetup += time.Since(start)
-		if err != nil {
-			b.Fatal(err)
+		if sessionErr != nil {
+			b.Fatal(sessionErr)
 		}
 		start = time.Now()
-		row, err := session.Prefill(prompt)
+		row, stepErr := session.Prefill(prompt)
 		prefill += time.Since(start)
-		if err != nil {
-			b.Fatal(err)
+		if stepErr != nil {
+			b.Fatal(stepErr)
 		}
-		next, err := greedyToken(row)
+		next, stepErr := greedyToken(row)
 		firstToken += time.Since(start)
-		if err != nil {
-			b.Fatal(err)
+		if stepErr != nil {
+			b.Fatal(stepErr)
 		}
 		suffix := []int64{next}
 		start = time.Now()
 		for range budget - 1 {
-			row, err = session.Decode(next)
-			if err != nil {
-				b.Fatal(err)
+			row, stepErr = session.Decode(next)
+			if stepErr != nil {
+				b.Fatal(stepErr)
 			}
-			next, err = greedyToken(row)
-			if err != nil {
-				b.Fatal(err)
+			next, stepErr = greedyToken(row)
+			if stepErr != nil {
+				b.Fatal(stepErr)
 			}
 			suffix = append(suffix, next)
 		}
@@ -100,9 +124,9 @@ func BenchmarkLlama32CachedGeneration(b *testing.B) {
 		if !slices.Equal(suffix, want.SuffixIDs) || session.Position() != capacity {
 			b.Fatalf("got suffix %v at position %d, want %v at %d", suffix, session.Position(), want.SuffixIDs, capacity)
 		}
-		text, err := vocab.Decode(suffix)
-		if err != nil || hex.EncodeToString([]byte(text)) != want.DecodedHex {
-			b.Fatalf("decode suffix: got %q (%v), want hex %s", text, err, want.DecodedHex)
+		text, decodeErr := vocab.Decode(suffix)
+		if decodeErr != nil || hex.EncodeToString([]byte(text)) != want.DecodedHex {
+			b.Fatalf("decode suffix: got %q (%v), want hex %s", text, decodeErr, want.DecodedHex)
 		}
 	}
 	trials := float64(b.N)

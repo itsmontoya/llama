@@ -2,6 +2,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -29,6 +31,7 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	tokenizerPath := flags.String("tokenizer", "", "matching legacy tokenizer vocabulary path")
 	hfModelDir := flags.String("hf-model-dir", "", "Hugging Face model and tokenizer directory")
 	context := flags.Int64("context", 512, "Hugging Face runtime context cap in tokens")
+	ffnBackend := flags.String("ffn-backend", "cpu", "Hugging Face FFN backend (cpu or metal)")
 	uncached := flags.Bool("uncached", false, "recompute full prefixes in Hugging Face mode")
 	prompt := flags.String("prompt", "", "text prompt")
 	maxNewTokens := flags.Int("max-new-tokens", 16, "maximum new tokens")
@@ -51,6 +54,10 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 		usageError = "-hf-model-dir requires a nonempty directory path"
 	case !useHF && provided["context"]:
 		usageError = "-context requires -hf-model-dir"
+	case !useHF && provided["ffn-backend"]:
+		usageError = "-ffn-backend requires -hf-model-dir"
+	case *ffnBackend != "cpu" && *ffnBackend != "metal":
+		usageError = "-ffn-backend must be cpu or metal"
 	case !useHF && provided["uncached"]:
 		usageError = "-uncached requires -hf-model-dir"
 	case !useHF && (*modelPath == "" || *tokenizerPath == ""):
@@ -68,7 +75,7 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	var result generationResult
 	var err error
 	if useHF {
-		result, err = generateHF(*hfModelDir, *context, *prompt, *maxNewTokens, *uncached)
+		result, err = generateHF(*hfModelDir, *context, *prompt, *maxNewTokens, *uncached, *ffnBackend == "metal")
 	} else {
 		result, err = generateLegacy(*modelPath, *tokenizerPath, *prompt, *maxNewTokens)
 	}
@@ -103,11 +110,24 @@ func generateLegacy(modelPath, tokenizerPath, prompt string, maxNewTokens int) (
 	return generationResult{promptIDs: promptIDs, suffixIDs: suffixIDs, text: text}, err
 }
 
-func generateHF(dir string, context int64, prompt string, maxNewTokens int, uncached bool) (generationResult, error) {
-	decoder, generation, err := llama.LoadHFModel(dir, context)
+func generateHF(dir string, maxContext int64, prompt string, maxNewTokens int, uncached, metalFFN bool) (result generationResult, err error) {
+	var (
+		decoder    *llama.Decoder
+		generation llama.HFGenerationConfig
+	)
+	if metalFFN {
+		decoder, generation, err = llama.LoadHFModelMetal(context.Background(), dir, maxContext)
+	} else {
+		decoder, generation, err = llama.LoadHFModel(dir, maxContext)
+	}
 	if err != nil {
 		return generationResult{}, err
 	}
+	defer func() {
+		if closeErr := decoder.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	vocab, err := tokenizer.LoadLlama3(dir, decoder.Config().VocabSize, generation.BOSID, generation.StopIDs)
 	if err != nil {
 		return generationResult{}, err
