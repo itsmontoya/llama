@@ -89,7 +89,7 @@ def percentile(values, fraction):
 def write_csv(path, records):
     fieldnames = list(dict.fromkeys(field for record in records for field in record))
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
 
