@@ -4,7 +4,6 @@ package llama
 
 import (
 	"os"
-	"runtime"
 	"slices"
 	"testing"
 
@@ -32,6 +31,30 @@ func TestLlama32MetalAttention(t *testing.T) {
 	if prompt, err = vocab.Encode(llama32ShortPrompt); err != nil || len(prompt) != 6 {
 		t.Fatalf("short prompt IDs %v, error %v", prompt, err)
 	}
+	t.Run("generation_limits", func(t *testing.T) {
+		for _, mode := range [...]struct {
+			name     string
+			generate func([]int64, int, ...int64) ([]int64, error)
+		}{
+			{name: "cached", generate: decoder.GenerateGreedyCached},
+			{name: "full_prefix", generate: decoder.GenerateGreedy},
+		} {
+			t.Run(mode.name, func(t *testing.T) {
+				var stopped, stopErr = mode.generate(prompt, 8, 13)
+				if stopErr != nil || !slices.Equal(stopped, []int64{12366}) {
+					t.Fatalf("generation before stop token 13: IDs %v, error %v", stopped, stopErr)
+				}
+				var full = make([]int64, decoder.Config().MaxContext)
+				var limited, limitErr = mode.generate(full, 8)
+				if limitErr != nil || limited == nil || len(limited) != 0 {
+					t.Fatalf("full context generation: IDs %v, error %v", limited, limitErr)
+				}
+				if limited, limitErr = mode.generate(append(full, 0), 8); limited != nil || limitErr == nil {
+					t.Fatalf("over context generation: IDs %v, error %v", limited, limitErr)
+				}
+			})
+		}
+	})
 	t.Run("sustained_decode", func(t *testing.T) {
 		// Positions 6–37 are the established host benchmark trajectory. The
 		// first eight selections also form the pinned Transformers suffix.
@@ -66,11 +89,8 @@ func TestLlama32MetalAttention(t *testing.T) {
 	})
 
 	t.Run("independent_decoders", func(t *testing.T) {
-		// Reclaim preceding temporary host classifier operands before loading
-		// the second decoder. The model weights and device handles stay live.
-		runtime.GC()
 		var other = loadTestMetalAttention(t, dir, 512)
-		if decoder.metal.device == other.metal.device || decoder.embedding == other.embedding {
+		if decoder.metal.device == other.metal.device || decoder.metalEmbedding == other.metalEmbedding || decoder.metalOutput == other.metalOutput {
 			t.Fatal("independent decoders share a logical Metal device or embedding")
 		}
 		checkConcurrentMetalSessions(t, [2]*Decoder{decoder, other}, prompt, []int64{12366, 13})

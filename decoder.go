@@ -36,7 +36,8 @@ type Decoder struct {
 	embedding, norm, output *tensor.Tensor
 	blocks                  []blockWeights
 	metal                   *metalModel
-	metalNorm               *gpu.Tensor
+	metalEmbedding          *gpu.Tensor
+	metalNorm, metalOutput  *gpu.Tensor
 }
 
 // Config returns the decoder's resolved configuration by value.
@@ -84,7 +85,7 @@ func (d *Decoder) ForwardWithTrace(tokens []int64) (*tensor.Tensor, map[string]*
 }
 
 func (d *Decoder) validatePrefix(tokens []int64) error {
-	if d == nil || d.embedding == nil {
+	if d == nil || (d.embedding == nil && d.metalEmbedding == nil) {
 		return fmt.Errorf("llama: decoder is uninitialized")
 	}
 	if len(tokens) == 0 || int64(len(tokens)) > d.config.MaxContext {

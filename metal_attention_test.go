@@ -121,8 +121,18 @@ func TestMetalAttentionFailureAndRetry(t *testing.T) {
 	last.values[0] = saved
 	writeHFFixtureTensors(t, dir, safetensors.F32, entries)
 	decoder = loadTestMetalAttention(t, dir, config.MaxContext)
-	if decoder.output != decoder.embedding || decoder.norm != nil || decoder.metalNorm == nil {
-		t.Fatal("tied output or final norm has the wrong ownership")
+	if decoder.metalEmbedding == nil || decoder.metalOutput != decoder.metalEmbedding ||
+		decoder.embedding != nil || decoder.output != nil || decoder.norm != nil || decoder.metalNorm == nil {
+		t.Fatal("expected shared Metal embedding and classifier, Metal norm, and no host duplicates")
+	}
+	var embeddingOwners int
+	for _, weight := range decoder.metal.weights {
+		if weight == decoder.metalEmbedding {
+			embeddingOwners++
+		}
+	}
+	if embeddingOwners != 1 {
+		t.Fatalf("tied embedding registered for release %d times, want 1", embeddingOwners)
 	}
 	for layer, block := range decoder.blocks {
 		if block.wq != nil || block.wk != nil || block.wv != nil || block.wo != nil ||
@@ -177,16 +187,31 @@ func TestMetalAttentionFailureAndRetry(t *testing.T) {
 	}
 	assertMetalCachePosition(t, session, 4)
 
-	// Fail the final classifier after the Metal command successfully wrote all
-	// staging slots. Each slot is still unpublished and cancellable.
-	var output = decoder.output
-	var invalid = make([]float32, config.VocabSize*config.Dim)
-	invalid[0] = float32(math.NaN())
-	if decoder.output, err = tensor.FromFloat32([]int64{config.VocabSize, config.Dim}, invalid); err != nil {
+	// Reject classifier recording after all layer appends have been staged.
+	var output = decoder.metalOutput
+	decoder.metalOutput = nil
+	row, err = session.Decode(5)
+	decoder.metalOutput = output
+	if row != nil || !errors.Is(err, gpu.ErrInvalid) || !strings.Contains(err.Error(), "Metal classifier") {
+		t.Fatalf("failed classifier recording: %d logits, error %v", len(row), err)
+	}
+	assertMetalCachePosition(t, session, 4)
+
+	// Inject nonfinite output after a successful command has written logits and
+	// staged KV. Validation must still abandon every append.
+	var invalidOutput *gpu.Tensor
+	if invalidOutput, err = decoder.metal.device.NewFloat32([]int64{config.VocabSize, config.Dim}); err != nil {
 		t.Fatal(err)
 	}
+	defer invalidOutput.Close()
+	var invalid = make([]float32, config.VocabSize*config.Dim)
+	invalid[0] = float32(math.NaN())
+	if err = invalidOutput.Upload(invalid); err != nil {
+		t.Fatal(err)
+	}
+	decoder.metalOutput = invalidOutput
 	row, err = session.Decode(5)
-	decoder.output = output
+	decoder.metalOutput = output
 	if row != nil || err == nil || !strings.Contains(err.Error(), "nonfinite logit") {
 		t.Fatalf("invalid classifier output: %d logits, error %v", len(row), err)
 	}
@@ -213,6 +238,19 @@ func TestMetalAttentionFailureAndRetry(t *testing.T) {
 	if row, err = session.Decode(0); row != nil || !errors.Is(err, gpu.ErrClosed) {
 		t.Fatalf("decode after closing copied session handle: %d logits, error %v", len(row), err)
 	}
+
+	t.Run("classifier_tie", func(t *testing.T) {
+		clear(invalid)
+		if uploadErr := invalidOutput.Upload(invalid); uploadErr != nil {
+			t.Fatal(uploadErr)
+		}
+		decoder.metalOutput = invalidOutput
+		defer func() { decoder.metalOutput = output }()
+		var suffix, selectionErr = decoder.GenerateGreedyCached(prefix, 1)
+		if selectionErr != nil || !slices.Equal(suffix, []int64{0}) {
+			t.Fatalf("exact classifier tie: IDs %v, error %v", suffix, selectionErr)
+		}
+	})
 }
 
 func assertMetalCachePosition(t *testing.T, session *Session, want int64) {
@@ -244,6 +282,10 @@ func TestMetalAttentionCloseDuringStep(t *testing.T) {
 	var config, _, entries = makeHFCheckpointFixture(t, dir, false)
 	writeHFFixtureTensors(t, dir, safetensors.F32, entries)
 	var decoder = loadTestMetalAttention(t, dir, config.MaxContext)
+	if decoder.metalEmbedding == nil || decoder.metalOutput == nil || decoder.metalEmbedding == decoder.metalOutput ||
+		decoder.embedding != nil || decoder.output != nil {
+		t.Fatal("expected distinct Metal tensors for untied embedding and classifier, with no host duplicates")
+	}
 	var active = newTestMetalAttentionSession(t, decoder, 5)
 	var other = newTestMetalAttentionSession(t, decoder, 5)
 	var wait = holdMetalWait{Context: t.Context(), waiting: make(chan struct{}), resume: make(chan struct{})}

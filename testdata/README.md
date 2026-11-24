@@ -278,11 +278,13 @@ the same reference environment used above:
 
 ## Experimental Metal attention parity
 
-The same immutable snapshot and tolerances apply to device attention,
-RoPE and KV. These tests compare frozen logits and greedy IDs, cached and
-full-prefix execution, the 27/28/29-row prefill tails, and sustained decode at
-positions 6–37. Separate synthetic fixtures cover MHA, GQA, MQA, scoped
-cancellation, transactional retry and resource cleanup.
+The same immutable snapshot and tolerances apply to the resident FP32 path
+from embedding lookup through classification. These tests compare frozen
+logits and greedy IDs, cached and full-prefix execution, the 27/28/29-row
+prefill tails, and sustained decode at positions 6–37. They also check shared
+and independent models, stop tokens, and context limits. Separate synthetic
+fixtures cover MHA, GQA, MQA, a classifier tie, nonfinite classifier output,
+scoped cancellation, transactional retry, and resource cleanup.
 
 ```sh
 export LLAMA_32_1B_MODEL_DIR="$model_dir"
@@ -290,10 +292,12 @@ GOWORK=off CGO_ENABLED=1 go test -p 1 -count=1 -v -tags=metal \
   -run '^Test(MetalAttention|Llama32MetalAttention)' . ./cmd/generate
 ```
 
-Use the following benchmarks in separate fresh processes, alternating
-the order. The untagged CPU and the tagged FFN-only modes provide separate
-controls. The Metal option leaves the ordinary tensor classifier active,
-which can dispatch to Metal with fresh operand copies in a tagged build.
+Run the following benchmarks in separate fresh processes, alternating the
+order. The untagged binary is the host-only control. In the tagged FFN-only
+mode, ordinary tensor products can independently dispatch to Metal. The
+resident mode uses one explicit Metal command per step and downloads one
+logit row. See the [FP32 Metal handoff](../METAL_FP32_HANDOFF.md) for detailed
+reproduction commands and measured results.
 
 ```sh
 GOWORK=off CGO_ENABLED=1 go test -c -o "$bin_dir/llama-cpu.test" .

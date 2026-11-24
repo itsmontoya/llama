@@ -32,7 +32,7 @@ type layerCache struct {
 // Capacity must be in [1, Config().MaxContext]. For Metal attention, Close
 // releases the device history when the session is no longer needed.
 func (d *Decoder) NewSession(capacity int64) (*Session, error) {
-	if d == nil || d.embedding == nil {
+	if d == nil || (d.embedding == nil && d.metalEmbedding == nil) {
 		return nil, fmt.Errorf("llama: decoder is uninitialized")
 	}
 	c := d.config
@@ -228,28 +228,24 @@ func (s *Session) commit(ctx context.Context, x *tensor.Tensor, next int64) (out
 	if err != nil {
 		return nil, err
 	}
-	var values []float32
-	if values, err = sessionLogits(ctx, logits, next); err != nil {
+	var values, readErr = logits.Float32Values()
+	if readErr != nil {
+		return nil, fmt.Errorf("llama: read session logits: %w", readErr)
+	}
+	if err = validateSessionLogits(ctx, values, next); err != nil {
 		return nil, err
 	}
 	s.position = next
 	return values, nil
 }
 
-func sessionLogits(ctx context.Context, logits *tensor.Tensor, next int64) (out []float32, err error) {
-	var values, readErr = logits.Float32Values()
-	if readErr != nil {
-		return nil, fmt.Errorf("llama: read session logits: %w", readErr)
-	}
+func validateSessionLogits(ctx context.Context, values []float32, next int64) (err error) {
 	for id, value := range values {
 		if !finite(float64(value)) {
-			return nil, fmt.Errorf("llama: nonfinite logit at position %d for ID %d", next-1, id)
+			return fmt.Errorf("llama: nonfinite logit at position %d for ID %d", next-1, id)
 		}
 	}
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
-	return values, nil
+	return ctx.Err()
 }
 
 // attendCached computes one query row. The length of scores is the populated

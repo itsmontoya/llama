@@ -13,7 +13,7 @@ type metalAttentionWeights struct {
 	attentionNorm, q, k, v, o, ffnNorm *gpu.Tensor
 }
 
-func newMetalAttentionScratch(device *gpu.Device, config Config, rows int64) (out *metalAttentionScratch, err error) {
+func newMetalAttentionScratch(device *gpu.Device, config Config, rows, logitRows int64) (out *metalAttentionScratch, err error) {
 	var (
 		scratch metalAttentionScratch
 		hidden  = []int64{rows, config.Dim}
@@ -38,8 +38,15 @@ func newMetalAttentionScratch(device *gpu.Device, config Config, rows int64) (ou
 		{&scratch.ffn.up, wide},
 		{&scratch.ffn.activated, wide},
 		{&scratch.ffn.output, hidden},
+		{&scratch.logits, []int64{logitRows, config.VocabSize}},
 	} {
 		if *item.dst, err = device.NewFloat32(item.shape); err != nil {
+			scratch.close()
+			return nil, err
+		}
+	}
+	if logitRows != rows {
+		if scratch.last, err = device.NewFloat32([]int64{1, config.Dim}); err != nil {
 			scratch.close()
 			return nil, err
 		}
@@ -54,6 +61,7 @@ type metalAttentionScratch struct {
 	q, k, v, rotatedQ, rotatedK *gpu.Tensor
 	attended, projected         *gpu.Tensor
 	residual                    *gpu.Tensor
+	last, logits                *gpu.Tensor
 	ffn                         metalFFNActivations
 }
 
@@ -61,6 +69,7 @@ func (s *metalAttentionScratch) close() {
 	for _, value := range [...]*gpu.Tensor{
 		s.hidden, s.normalized, s.q, s.k, s.v, s.rotatedQ, s.rotatedK,
 		s.attended, s.projected, s.residual, s.ffn.gate, s.ffn.up, s.ffn.activated, s.ffn.output,
+		s.last, s.logits,
 	} {
 		_ = value.Close()
 	}
@@ -84,55 +93,11 @@ func (d *Decoder) forwardMetalPrefix(ctx context.Context, tokens []int64) (out *
 	defer closeMetalCaches(caches)
 	var updates = make([]*gpu.KVAppend, len(caches))
 	defer discardMetalAppends(updates)
-	return d.metalLogits(ctx, tokens, 0, caches, updates, false)
-}
-
-// metalLogits is shared by full-prefix inference, prefill and decode. The caller
-// owns the model read lock, private caches and cleanup of each staged append.
-func (d *Decoder) metalLogits(ctx context.Context, tokens []int64, position int64, caches []*gpu.KVCache, updates []*gpu.KVAppend, lastOnly bool) (out *tensor.Tensor, err error) {
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
-	var rows = int64(len(tokens))
-	var scratch *metalAttentionScratch
-	if scratch, err = newMetalAttentionScratch(d.metal.device, d.config, rows); err != nil {
-		return nil, fmt.Errorf("llama: allocate Metal attention scratch: %w", err)
-	}
-	defer scratch.close()
-
-	var embedding *tensor.Tensor
-	if embedding, err = gather(d.embedding, tokens, 0); err != nil {
-		return nil, fmt.Errorf("llama: embedding: %w", err)
-	}
 	var values []float32
-	if values, err = embedding.Float32Values(); err != nil {
-		return nil, fmt.Errorf("llama: read embedding: %w", err)
-	}
-	if err = scratch.hidden.Upload(values); err != nil {
-		return nil, fmt.Errorf("llama: upload embedding: %w", err)
-	}
-	if err = d.runMetalLayers(ctx, scratch, position, caches, updates); err != nil {
+	if values, err = d.metalLogits(ctx, tokens, 0, caches, updates, false); err != nil {
 		return nil, err
 	}
-
-	// The ordinary tensor classifier is the boundary of the resident sequence.
-	// DownloadInto copies the entire tensor, even when only the tail is needed.
-	if err = scratch.normalized.DownloadInto(values); err != nil {
-		return nil, fmt.Errorf("llama: download final hidden rows: %w", err)
-	}
-	var dim = d.config.Dim
-	if lastOnly {
-		values = values[(rows-1)*dim:]
-		rows = 1
-	}
-	var hidden *tensor.Tensor
-	if hidden, err = tensor.FromFloat32([]int64{rows, dim}, values); err != nil {
-		return nil, err
-	}
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
-	if out, err = d.classify(hidden, nil); err != nil {
+	if out, err = tensor.FromFloat32([]int64{int64(len(tokens)), d.config.VocabSize}, values); err != nil {
 		return nil, err
 	}
 	if err = ctx.Err(); err != nil {
@@ -141,7 +106,39 @@ func (d *Decoder) metalLogits(ctx context.Context, tokens []int64, position int6
 	return out, nil
 }
 
-func (d *Decoder) runMetalLayers(ctx context.Context, scratch *metalAttentionScratch, position int64, caches []*gpu.KVCache, updates []*gpu.KVAppend) (err error) {
+// metalLogits is shared by full-prefix inference, prefill and decode. The caller
+// owns the model read lock, private caches and cleanup of each staged append.
+func (d *Decoder) metalLogits(ctx context.Context, tokens []int64, position int64, caches []*gpu.KVCache, updates []*gpu.KVAppend, lastOnly bool) (out []float32, err error) {
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		rows      = int64(len(tokens))
+		logitRows = rows
+		scratch   *metalAttentionScratch
+	)
+	if lastOnly {
+		logitRows = 1
+	}
+	if scratch, err = newMetalAttentionScratch(d.metal.device, d.config, rows, logitRows); err != nil {
+		return nil, fmt.Errorf("llama: allocate Metal attention scratch: %w", err)
+	}
+	defer scratch.close()
+
+	if err = d.runMetalScope(ctx, scratch, tokens, position, caches, updates); err != nil {
+		return nil, err
+	}
+
+	// The successful device allocation checked the byte count before this
+	// host allocation. Session callers own this slice and can validate it in place.
+	out = make([]float32, logitRows*d.config.VocabSize)
+	if err = scratch.logits.DownloadInto(out); err != nil {
+		return nil, fmt.Errorf("llama: download Metal logits: %w", err)
+	}
+	return out, nil
+}
+
+func (d *Decoder) runMetalScope(ctx context.Context, scratch *metalAttentionScratch, tokens []int64, position int64, caches []*gpu.KVCache, updates []*gpu.KVAppend) (err error) {
 	var scope *gpu.Scope
 	if scope, err = d.metal.device.NewScope(); err != nil {
 		return err
@@ -153,6 +150,9 @@ func (d *Decoder) runMetalLayers(ctx context.Context, scratch *metalAttentionScr
 			err = errors.Join(err, closeErr)
 		}
 	}()
+	if err = scope.GatherRows(d.metalEmbedding, tokens, scratch.hidden); err != nil {
+		return fmt.Errorf("llama: Metal embedding: %w", err)
+	}
 	for index, block := range d.blocks {
 		if err = ctx.Err(); err != nil {
 			return err
@@ -163,6 +163,16 @@ func (d *Decoder) runMetalLayers(ctx context.Context, scratch *metalAttentionScr
 	}
 	if err = scope.RMSNorm(scratch.hidden, d.metalNorm, scratch.normalized, d.config.NormEpsilon); err != nil {
 		return fmt.Errorf("llama: final norm: %w", err)
+	}
+	var hidden = scratch.normalized
+	if scratch.last != nil {
+		if err = scope.GatherRows(hidden, []int64{int64(len(tokens)) - 1}, scratch.last); err != nil {
+			return fmt.Errorf("llama: final prompt row: %w", err)
+		}
+		hidden = scratch.last
+	}
+	if err = scope.MatMulRightTranspose(hidden, d.metalOutput, scratch.logits); err != nil {
+		return fmt.Errorf("llama: Metal classifier: %w", err)
 	}
 	if err = scope.Submit(ctx); err != nil {
 		return err

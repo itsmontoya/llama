@@ -2,7 +2,7 @@ module github.com/itsmontoya/llama
 
 go 1.27.3
 
-require github.com/itsmontoya/neuralnetwork v0.11.1
+require github.com/itsmontoya/neuralnetwork v0.11.2
 
 require (
 	github.com/tphakala/simd v1.3.0 // indirect

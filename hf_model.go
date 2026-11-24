@@ -34,12 +34,12 @@ func LoadHFModelMetal(ctx context.Context, dir string, maxContext int64) (*Decod
 	return loadHFModelMetal(ctx, dir, maxContext, false)
 }
 
-// LoadHFModelMetalAttention loads a Hugging Face model with attention, RoPE,
-// residuals, normalization and FFN on one Metal device. Embedding lookup and
-// classification use the regular tensor path. Each session keeps its own
-// device KV cache. Call Decoder.Close to release all model and session resources.
-// The context controls loading. Unavailable builds or devices return an error
-// wrapping gpu.ErrUnavailable.
+// LoadHFModelMetalAttention loads a Hugging Face model for resident FP32
+// inference on one Metal device, from embedding lookup through classification.
+// Each session keeps its own device KV cache. Forward returns every logit row.
+// Prefill and Decode download only the final row. Call Decoder.Close to release
+// all model and session resources. The context controls loading. Unavailable
+// builds or devices return an error wrapping gpu.ErrUnavailable.
 func LoadHFModelMetalAttention(ctx context.Context, dir string, maxContext int64) (decoder *Decoder, generation HFGenerationConfig, err error) {
 	return loadHFModelMetal(ctx, dir, maxContext, true)
 }
