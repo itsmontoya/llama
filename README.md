@@ -92,8 +92,9 @@ host storage. The layer crossings and model uploads contribute to latency.
 
 ### Experimental Metal attention and KV cache
 
-Add `-attention-backend metal` to the Metal FFN command to keep attention,
-RoPE, normalization, residuals, and the FFN in one device command per step:
+Add `-attention-backend metal` to the Metal FFN command for resident FP32
+inference. Each step uses one device command from embedding lookup through
+the transformer blocks and final classifier.
 
 ```sh
 "$bin_dir/generate-metal" -ffn-backend metal -attention-backend metal \
@@ -103,16 +104,19 @@ RoPE, normalization, residuals, and the FFN in one device command per step:
 
 `-uncached` recomputes each prefix with the same device operations and
 temporary caches. Cached generation keeps a private device history per
-session. The session commits all layers after classification succeeds.
-With neuralnetwork v0.11.1, two device slots per layer preserve the prior
-history on failure and require a device-side prefix copy at each append.
+session and downloads one final logit row per step. The host checks the row
+for finite values before the session publishes its new history. Greedy
+selection and stop tokens use the same policy as the CPU decoder. Two
+device slots per layer preserve the prior history on failure and require a
+device-side prefix copy at each append.
 
 In Go, use `LoadHFModelMetalAttention`. Call `Session.Close` when a cached
 session is finished, and `Decoder.Close` to release the model and any
-remaining device caches. Forward and cached steps use the regular tensor
-path for embedding lookup and classification. The full diagnostic trace
-requires attention probabilities, which the fused Metal operation does not
-export. Use the existing CPU or FFN-only mode for that trace.
+remaining device caches. `Forward` returns every logit row for diagnostics.
+`ForwardWithTrace` requires attention probabilities and is available through
+the CPU and FFN-only modes. The Metal loader uploads tied embedding and
+classifier weights once into a shared allocation. See the [FP32 Metal
+handoff](METAL_FP32_HANDOFF.md) for validation, memory use, and timings.
 
 ### Ask questions in the terminal
 
