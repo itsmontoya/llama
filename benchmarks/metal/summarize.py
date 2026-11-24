@@ -45,6 +45,10 @@ def metric_map(sample):
             "allocs": phase["Allocations"],
             "predictions_s": SEC * sum(len(lane["Winners"]) for lane in lanes) / phase["WallNS"],
         }
+        if len(lanes) == 2:
+            ttft = [lane["FirstNS"] for lane in lanes]
+            fields.update(lane1_ttft_ms=ttft[0] / MS, lane2_ttft_ms=ttft[1] / MS,
+                          prefill_fairness=max(ttft) / min(ttft))
         if lanes[0]["DecodeNS"]:
             first = [lane["FirstNS"] for lane in lanes]
             ends = [lane["DecodeEndNS"][-1] for lane in lanes]
