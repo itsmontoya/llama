@@ -50,11 +50,11 @@ def verify_snapshot(model):
 
 def verify_module():
     selected = json.loads(output("go", "list", "-m", "-json", MODULE))
-    require(selected["Version"] == "v0.12.0" and not selected.get("Replace"), "LL-06 module pin mismatch")
-    release = json.loads(output("go", "mod", "download", "-json", f"{MODULE}@v0.12.0"))
-    require(release["Sum"] == "h1:CsQyT1Cb59ZYgyTJamc5TihWmK6LfCYofQKfBXm7YWs=", "module checksum mismatch")
+    require(selected["Version"] == "v0.12.1" and not selected.get("Replace"), "LL-06 module pin mismatch")
+    release = json.loads(output("go", "mod", "download", "-json", f"{MODULE}@v0.12.1"))
+    require(release["Sum"] == "h1:y4YSQZ9BaK1tM301y1lqSD+A18j7NAYtYi2i8+4Q0yY=", "module checksum mismatch")
     require(release["GoModSum"] == "h1:SafbkuDehVErsuJAL5FHFsLhKJbeh/OI3ItvbmwDafw=", "go.mod checksum mismatch")
-    require(release.get("Origin", {}).get("Hash") == "1638f4a627d3379c94860c0e59a6b2cf2c284479",
+    require(release.get("Origin", {}).get("Hash") == "32f83b827469b384e3a2546dc9ef4a5482e2c479",
             "module tag origin mismatch")
     return release
 
