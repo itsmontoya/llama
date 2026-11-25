@@ -58,12 +58,25 @@ func (w decoderWeight) store(name string, values []float32, model *metalModel) (
 	}
 	switch {
 	case w.metal != nil && model != nil && (model.attention || w.prepared != nil):
-		*w.metal, err = model.upload(w.shape, values)
+		*w.metal, err = model.uploadWithDType(w.shape, values, model.weightDTypeFor(w.name))
 	case w.prepared != nil:
 		*w.prepared, err = tensor.PrepareRightTranspose(w.shape, values)
 	default:
 		*w.target, err = tensor.FromFloat32(w.shape, values)
 	}
+	if err != nil {
+		return fmt.Errorf("llama: %s: %w", name, err)
+	}
+	return nil
+}
+
+func (w decoderWeight) storeBFloat16Bits(name string, bits []uint16, model *metalModel) (err error) {
+	for index, value := range bits {
+		if (value & 0x7f80) == 0x7f80 {
+			return fmt.Errorf("llama: %s contains nonfinite value at %d", name, index)
+		}
+	}
+	*w.metal, err = model.uploadBFloat16Bits(w.shape, bits)
 	if err != nil {
 		return fmt.Errorf("llama: %s: %w", name, err)
 	}

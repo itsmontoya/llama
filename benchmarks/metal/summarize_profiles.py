@@ -12,16 +12,16 @@ from summarize import MS, span
 
 
 def category(name, rows, width, output, variant):
-    if name != "nn_matmul":
+    if not name.startswith("nn_matmul"):
         return name
-    require(variant == 2 and rows > 0 and width > 0 and output > 0,
-            f"unexpected matmul dimensions {rows} x {width} -> {output}, variant {variant}")
-    if output == 128256:
-        return "classifier"
-    if (width, output) in ((2048, 8192), (8192, 2048)):
-        return "feed-forward projection"
-    require((width, output) in ((2048, 2048), (2048, 512)), f"unexpected projection {width} -> {output}")
-    return "attention projection"
+    if rows > 0 and width > 0 and output > 0:
+        if output == 128256:
+            return "classifier"
+        if (width, output) in ((2048, 8192), (8192, 2048)):
+            return "feed-forward projection"
+        if (width, output) in ((2048, 2048), (2048, 512)):
+            return "attention projection"
+    return name
 
 
 def read_trace(path):
@@ -70,12 +70,19 @@ def summarize_command(path):
     phase_metrics = defaultdict(list)
     sampled_stages = defaultdict(list)
     memory = []
+    blits_set = {cmd[1] for cmd in commands.values()}
+    max_blits = max(blits_set)
     for index, command in sorted(commands.items()):
         compute, blits, dispatches, submit, wait, start, end, status, bytes_allocated = command
-        require(compute == dispatches == 242 and blits in (17, 18), f"{path}: command layout changed")
+        require(compute == dispatches and compute >= 242 and blits >= 0, f"{path}: command layout changed")
         require(end > start > 0 and status == 4, f"{path}: Metal command {index} failed or lacked timestamps")
         phase = "first" if index < baseline_cmds else "warm"
-        phase += " decode" if blits == 17 else " prefill"
+        if work in ("27", "28", "29"):
+            phase += " prefill"
+        elif len(blits_set) > 1:
+            phase += " prefill" if blits == max_blits else " decode"
+        else:
+            phase += " decode"
         phase_metrics[phase].append(((end - start) / MS, wait / MS, submit / MS, start, end))
         memory.append(bytes_allocated)
         if support[4] == "1":

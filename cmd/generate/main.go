@@ -11,6 +11,7 @@ import (
 
 	"github.com/itsmontoya/llama"
 	"github.com/itsmontoya/llama/internal/tokenizer"
+	"github.com/itsmontoya/neuralnetwork/gpu"
 )
 
 func main() {
@@ -33,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	context := flags.Int64("context", 512, "Hugging Face runtime context cap in tokens")
 	ffnBackend := flags.String("ffn-backend", "cpu", "Hugging Face FFN backend (cpu or metal)")
 	attentionBackend := flags.String("attention-backend", "cpu", "Hugging Face attention backend (cpu or metal with -ffn-backend metal)")
+	metalWeightDType := flags.String("metal-weight-dtype", "float32", "Metal attention weight dtype (float32, float16, bfloat16, q8_0, or q4_0)")
+	metalKVDType := flags.String("metal-kv-dtype", "float32", "Metal attention KV cache dtype (float32 or float16)")
 	uncached := flags.Bool("uncached", false, "recompute full prefixes in Hugging Face mode")
 	prompt := flags.String("prompt", "", "text prompt")
 	maxNewTokens := flags.Int("max-new-tokens", 16, "maximum new tokens")
@@ -65,6 +68,10 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 		usageError = "-attention-backend must be cpu or metal"
 	case *attentionBackend == "metal" && *ffnBackend != "metal":
 		usageError = "-attention-backend metal requires -ffn-backend metal"
+	case provided["metal-weight-dtype"] && *attentionBackend != "metal":
+		usageError = "-metal-weight-dtype requires -attention-backend metal"
+	case provided["metal-kv-dtype"] && *attentionBackend != "metal":
+		usageError = "-metal-kv-dtype requires -attention-backend metal"
 	case !useHF && provided["uncached"]:
 		usageError = "-uncached requires -hf-model-dir"
 	case !useHF && (*modelPath == "" || *tokenizerPath == ""):
@@ -74,6 +81,18 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	case *maxNewTokens < 0:
 		usageError = "-max-new-tokens must be nonnegative"
 	}
+	var (
+		weightDType gpu.DType
+		kvDType     gpu.DType
+		parseErr    error
+	)
+	if usageError == "" && *attentionBackend == "metal" {
+		if weightDType, parseErr = parseMetalWeightDType(*metalWeightDType); parseErr != nil {
+			usageError = parseErr.Error()
+		} else if kvDType, parseErr = parseMetalKVDType(*metalKVDType); parseErr != nil {
+			usageError = parseErr.Error()
+		}
+	}
 	if usageError != "" {
 		fmt.Fprintln(stderr, "generate:", usageError)
 		return generationResult{}, 2
@@ -82,7 +101,10 @@ func run(args []string, stdout, stderr io.Writer) (generationResult, int) {
 	var result generationResult
 	var err error
 	if useHF {
-		result, err = generateHF(*hfModelDir, *context, *prompt, *maxNewTokens, *uncached, *ffnBackend == "metal", *attentionBackend == "metal")
+		result, err = generateHF(*hfModelDir, *context, *prompt, *maxNewTokens, *uncached, *ffnBackend == "metal", *attentionBackend == "metal", llama.MetalOptions{
+			WeightDType:  weightDType,
+			KVCacheDType: kvDType,
+		})
 	} else {
 		result, err = generateLegacy(*modelPath, *tokenizerPath, *prompt, *maxNewTokens)
 	}
@@ -117,14 +139,42 @@ func generateLegacy(modelPath, tokenizerPath, prompt string, maxNewTokens int) (
 	return generationResult{promptIDs: promptIDs, suffixIDs: suffixIDs, text: text}, err
 }
 
-func generateHF(dir string, maxContext int64, prompt string, maxNewTokens int, uncached, metalFFN, metalAttention bool) (result generationResult, err error) {
+func parseMetalWeightDType(value string) (gpu.DType, error) {
+	switch value {
+	case "float32":
+		return gpu.Float32, nil
+	case "float16":
+		return gpu.Float16, nil
+	case "bfloat16":
+		return gpu.BFloat16, nil
+	case "q8_0":
+		return gpu.Q8_0, nil
+	case "q4_0":
+		return gpu.Q4_0, nil
+	default:
+		return 0, fmt.Errorf("-metal-weight-dtype must be float32, float16, bfloat16, q8_0, or q4_0")
+	}
+}
+
+func parseMetalKVDType(value string) (gpu.DType, error) {
+	switch value {
+	case "float32":
+		return gpu.Float32, nil
+	case "float16":
+		return gpu.Float16, nil
+	default:
+		return 0, fmt.Errorf("-metal-kv-dtype must be float32 or float16")
+	}
+}
+
+func generateHF(dir string, maxContext int64, prompt string, maxNewTokens int, uncached, metalFFN, metalAttention bool, metalOptions llama.MetalOptions) (result generationResult, err error) {
 	var (
 		decoder    *llama.Decoder
 		generation llama.HFGenerationConfig
 	)
 	switch {
 	case metalAttention:
-		decoder, generation, err = llama.LoadHFModelMetalAttention(context.Background(), dir, maxContext)
+		decoder, generation, err = llama.LoadHFModelMetalAttentionWithOptions(context.Background(), dir, maxContext, metalOptions)
 	case metalFFN:
 		decoder, generation, err = llama.LoadHFModelMetal(context.Background(), dir, maxContext)
 	default:

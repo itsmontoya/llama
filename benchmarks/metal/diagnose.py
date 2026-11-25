@@ -31,11 +31,14 @@ def write_overlay(run):
         ("var model = metalModel", 'fmt.Printf("LL04 HOST device_open 0 %d\\n", time.Since(phase).Nanoseconds())\n\tvar model = metalModel'),
     ])
     instrument("metal_model.go", [
-        ("var weight *gpu.Tensor", "var phase = time.Now()\n\tvar weight *gpu.Tensor"),
+        ("func (m *metalModel) upload(shape []int64, values []float32) (out *gpu.Tensor, err error) {\n\tvar weight *gpu.Tensor", "func (m *metalModel) upload(shape []int64, values []float32) (out *gpu.Tensor, err error) {\n\tvar phase = time.Now()\n\tvar weight *gpu.Tensor"),
         ("if err = weight.Upload(values)", '''fmt.Printf("LL04 HOST model_allocate %d %d\\n", len(values)*4, time.Since(phase).Nanoseconds())
 	phase = time.Now()
 	if err = weight.Upload(values)'''),
-        ("m.weights = append", '''fmt.Printf("LL04 HOST model_upload %d %d\\n", len(values)*4, time.Since(phase).Nanoseconds())
+        ("if err = weight.Upload(values); err != nil {\n\t\treturn nil, errors.Join(err, weight.Close())\n\t}\n\tm.weights = append", '''if err = weight.Upload(values); err != nil {
+		return nil, errors.Join(err, weight.Close())
+	}
+	fmt.Printf("LL04 HOST model_upload %d %d\\n", len(values)*4, time.Since(phase).Nanoseconds())
 	m.weights = append'''),
     ])
     instrument("metal_attention.go", [
@@ -92,6 +95,7 @@ def main():
     require(args.repeats > 0, "positive repeats required")
     plan = json.loads((root / "plan.json").read_text())
     model = Path(plan["model"])
+    metal_backend = plan.get("metal_backend", "metal")
     cases = {"short", "sustained", "27", "28", "29", "shared", "independent"}
     require(cases.issubset(plan["cases"]), "profiling requires all targeted primary workloads")
     require(digest(Path("llama32_paired_test.go")) == plan["driver_sha256"], "benchmark driver differs")
@@ -107,38 +111,41 @@ def main():
     subprocess.run(["xcrun", "clang", "-O2", "-fobjc-arc", "-dynamiclib", "-Wall", "-Wextra", "-Werror",
                     "-framework", "Foundation", "-framework", "Metal",
                     str(Path(__file__).with_name("metal_probe.m")), "-o", str(library)], check=True)
-    driver = run / "host-timers"
-    overlay = write_overlay(run)
-    subprocess.run(["go", "test", "-c", "-trimpath", "-tags=metal", "-overlay", str(overlay), "-o", str(driver), "."], check=True)
+    driver = None
+    if metal_backend == "metal":
+        driver = run / "host-timers"
+        overlay = write_overlay(run)
+        subprocess.run(["go", "test", "-c", "-trimpath", "-tags=metal", "-overlay", str(overlay), "-o", str(driver), "."], check=True)
 
     def measure(backend, case, label, binary=None, native=None, profile=False, counters=False):
         print(label, flush=True)
         if counters:
             os.environ["LLAMA_METAL_SAMPLE"] = "1"
         run_sample(run, model, backend, case, label, profile=profile, native=native,
-                   binary=binary or root / backend)
+                   binary=binary or root / ("cpu" if backend == "cpu" else "metal"))
         baseline = root / "raw" / f"{case}-01-{backend}.f32"
         measured = run / "raw" / f"{label}.f32"
         require(digest(measured) == digest(baseline), f"{label}: diagnostic changed output rows")
         os.environ.pop("LLAMA_METAL_SAMPLE", None)
         time.sleep(3)
 
-    for backend in ("cpu", "metal"):
+    for backend in ("cpu", metal_backend):
         measure(backend, "sustained", f"pprof-{backend}", profile=True)
     for trial in range(1, args.repeats + 1):
-        measure("metal", "short", f"host-{trial}", binary=driver)
-        measure("metal", "short", f"command-short-{trial}", native=library)
-        measure("metal", "sustained", f"command-{trial}", native=library)
-        measure("metal", "sustained", f"counters-{trial}", native=library, counters=True)
+        if driver is not None:
+            measure(metal_backend, "short", f"host-{trial}", binary=driver)
+        measure(metal_backend, "short", f"command-short-{trial}", native=library)
+        measure(metal_backend, "sustained", f"command-{trial}", native=library)
+        measure(metal_backend, "sustained", f"counters-{trial}", native=library, counters=True)
     for case in ("27", "28", "29", "shared", "independent"):
-        measure("metal", case, f"command-{case}", native=library)
+        measure(metal_backend, case, f"command-{case}", native=library)
     for case in ("29", "shared", "independent"):
-        measure("metal", case, f"counters-{case}", native=library, counters=True)
-    for backend in ("cpu", "metal"):
+        measure(metal_backend, case, f"counters-{case}", native=library, counters=True)
+    for backend in ("cpu", metal_backend):
         prefix = run / "raw" / f"pprof-{backend}"
         for profile in ("cpu", "heap"):
             with (run / f"{backend}-{profile}-top.txt").open("w") as report:
-                subprocess.run(["go", "tool", "pprof", "-top", str(root / backend),
+                subprocess.run(["go", "tool", "pprof", "-top", str(root / ("cpu" if backend == "cpu" else "metal")),
                                 str(prefix.with_suffix(f".{profile}.pprof"))], check=True, stdout=report)
 
 

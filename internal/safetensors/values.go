@@ -46,3 +46,35 @@ func (f *File) ReadFloat32(name string) ([]float32, error) {
 	}
 	return values, nil
 }
+
+// ReadBFloat16Bits reads one named BF16 tensor directly as caller-owned
+// little-endian uint16 bit patterns without FP32 upcast. Returns an error if
+// the tensor does not exist or is not stored as BF16.
+func (f *File) ReadBFloat16Bits(name string) ([]uint16, error) {
+	descriptor, ok := f.tensors[name]
+	if !ok {
+		return nil, fmt.Errorf("safetensors: %q: unknown tensor %q", f.file.Name(), name)
+	}
+	if descriptor.DType != BF16 {
+		return nil, fmt.Errorf("safetensors: %q: tensor %q has dtype %s, want BF16", f.file.Name(), name, descriptor.DType)
+	}
+	const width = 2
+	start, end := descriptor.Offsets[0], descriptor.Offsets[1]
+	span := end - start
+	values := make([]uint16, int(span/width))
+	reader := io.NewSectionReader(f.file, f.payloadAt+start, span)
+	var buffer [readBufferBytes]byte
+	for offset := 0; offset < len(values); {
+		count := min(len(values)-offset, len(buffer)/width)
+		chunk := buffer[:count*width]
+		if _, err := io.ReadFull(reader, chunk); err != nil {
+			return nil, fmt.Errorf("safetensors: %q: read tensor %q at element %d: %w", f.file.Name(), name, offset, err)
+		}
+		out := values[offset : offset+count]
+		for i := range out {
+			out[i] = binary.LittleEndian.Uint16(chunk[i*2:])
+		}
+		offset += count
+	}
+	return values, nil
+}

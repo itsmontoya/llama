@@ -50,11 +50,11 @@ def verify_snapshot(model):
 
 def verify_module():
     selected = json.loads(output("go", "list", "-m", "-json", MODULE))
-    require(selected["Version"] == "v0.11.3" and not selected.get("Replace"), "LL-05 module pin mismatch")
-    release = json.loads(output("go", "mod", "download", "-json", f"{MODULE}@v0.11.3"))
-    require(release["Sum"] == "h1:mPThw+bMgln2u4MAGHxezzLYKh4RPF/qz+0cF0O7lZQ=", "module checksum mismatch")
+    require(selected["Version"] == "v0.12.1" and not selected.get("Replace"), "LL-06 module pin mismatch")
+    release = json.loads(output("go", "mod", "download", "-json", f"{MODULE}@v0.12.1"))
+    require(release["Sum"] == "h1:y4YSQZ9BaK1tM301y1lqSD+A18j7NAYtYi2i8+4Q0yY=", "module checksum mismatch")
     require(release["GoModSum"] == "h1:SafbkuDehVErsuJAL5FHFsLhKJbeh/OI3ItvbmwDafw=", "go.mod checksum mismatch")
-    require(release.get("Origin", {}).get("Hash") == "33cae5825c1b6724b0e784eb6293010cbc41d26c",
+    require(release.get("Origin", {}).get("Hash") == "32f83b827469b384e3a2546dc9ef4a5482e2c479",
             "module tag origin mismatch")
     return release
 
@@ -83,7 +83,7 @@ def run_sample(run, model, backend, case, label, profile=False, native=None, bin
     environment = dict(os.environ, LLAMA_32_1B_MODEL_DIR=str(model),
                        LLAMA_PAIRED_CASE=case, LLAMA_PAIRED_BACKEND=backend,
                        LLAMA_PAIRED_OUTPUT=str(prefix), LLAMA_PAIRED_PROFILE=str(int(profile)))
-    binary = binary or run / backend
+    binary = binary or run / ("cpu" if backend == "cpu" else "metal")
     command = ["/usr/bin/time", "-l"]
     if native is not None:
         # SIP strips DYLD variables before launching the system timing binary.
@@ -127,6 +127,11 @@ def main():
     parser.add_argument("--pairs", type=int, default=6)
     parser.add_argument("--case", action="append", choices=CASES)
     parser.add_argument("--cooldown", type=float, default=3)
+    parser.add_argument("--metal-backend", default="metal",
+                        choices=("metal", "metal-bf16", "metal-bf16-kv16",
+                                 "metal-fp16", "metal-fp16-kv16",
+                                 "metal-q8_0", "metal-q8_0-kv16",
+                                 "metal-q4_0", "metal-q4_0-kv16"))
     args = parser.parse_args()
     require(args.pairs > 0 and args.cooldown >= 0, "positive pairs and nonnegative cooldown required")
     require(Path("llama32_paired_test.go").is_file(), "run from the Llama repository root")
@@ -144,8 +149,10 @@ def main():
     subprocess.run(["go", "mod", "verify"], check=True)
     cases = args.case or CASES
     require(len(set(cases)) == len(cases), "workload names must be unique")
+    metal_backend = args.metal_backend
     plan = {
         "cases": cases, "pairs": args.pairs, "cooldown_s": args.cooldown, "model": str(model),
+        "metal_backend": metal_backend,
         "manifest_sha256": MANIFEST, "reference_sha256": REFERENCE, "checkpoint_sha256": WEIGHTS,
         "release": release, "commit": output("git", "rev-parse", "HEAD"),
         "git_status": output("git", "status", "--short"),
@@ -171,7 +178,7 @@ def main():
         for trial in range(1, args.pairs + 1):
             offset = (trial - 1) % len(cases)
             for case in (*cases[offset:], *cases[:offset]):
-                order = ("cpu", "metal") if (trial + cases.index(case)) % 2 else ("metal", "cpu")
+                order = ("cpu", metal_backend) if (trial + cases.index(case)) % 2 else (metal_backend, "cpu")
                 log.write(json.dumps({"case": case, "pair": trial, "order": order,
                                       "state_before": machine_state()}) + "\n")
                 for backend in order:

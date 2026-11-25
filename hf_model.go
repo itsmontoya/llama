@@ -31,7 +31,7 @@ func LoadHFModel(dir string, maxContext int64) (*Decoder, HFGenerationConfig, er
 // boundary. Unavailable builds or devices return an error wrapping
 // gpu.ErrUnavailable.
 func LoadHFModelMetal(ctx context.Context, dir string, maxContext int64) (*Decoder, HFGenerationConfig, error) {
-	return loadHFModelMetal(ctx, dir, maxContext, false)
+	return loadHFModelMetal(ctx, dir, maxContext, false, MetalOptions{WeightDType: gpu.Float32, KVCacheDType: gpu.Float32})
 }
 
 // LoadHFModelMetalAttention loads a Hugging Face model for resident FP32
@@ -41,10 +41,28 @@ func LoadHFModelMetal(ctx context.Context, dir string, maxContext int64) (*Decod
 // all model and session resources. The context controls loading. Unavailable
 // builds or devices return an error wrapping gpu.ErrUnavailable.
 func LoadHFModelMetalAttention(ctx context.Context, dir string, maxContext int64) (decoder *Decoder, generation HFGenerationConfig, err error) {
-	return loadHFModelMetal(ctx, dir, maxContext, true)
+	return LoadHFModelMetalAttentionWithOptions(ctx, dir, maxContext, MetalOptions{})
 }
 
-func loadHFModelMetal(ctx context.Context, dir string, maxContext int64, attention bool) (decoder *Decoder, generation HFGenerationConfig, err error) {
+// LoadHFModelMetalAttentionWithOptions loads a Hugging Face model for resident
+// Metal inference using the requested weight and KV cache storage dtypes.
+// Supported WeightDType values are 0 (Float32), Float32, Float16, BFloat16,
+// Q8_0, and Q4_0. Supported KVCacheDType values are 0 (Float32), Float32, and
+// Float16. Native BF16 checkpoints upload directly to BFloat16 device tensors
+// without FP32 upcast. In quantized weight modes (Q8_0/Q4_0), transformer
+// projections use the quantized dtype while norms remain Float32 and embeddings
+// (including tied embedding/classifier tables) use BFloat16 for GatherRows
+// compatibility. Unavailable builds or devices return an error wrapping
+// gpu.ErrUnavailable; invalid options return an error wrapping gpu.ErrInvalid.
+func LoadHFModelMetalAttentionWithOptions(ctx context.Context, dir string, maxContext int64, options MetalOptions) (decoder *Decoder, generation HFGenerationConfig, err error) {
+	var resolved MetalOptions
+	if resolved, err = options.resolve(); err != nil {
+		return nil, HFGenerationConfig{}, err
+	}
+	return loadHFModelMetal(ctx, dir, maxContext, true, resolved)
+}
+
+func loadHFModelMetal(ctx context.Context, dir string, maxContext int64, attention bool, options MetalOptions) (decoder *Decoder, generation HFGenerationConfig, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, HFGenerationConfig{}, err
 	}
@@ -56,7 +74,12 @@ func loadHFModelMetal(ctx context.Context, dir string, maxContext int64, attenti
 		}
 		return nil, HFGenerationConfig{}, fmt.Errorf("llama: Metal %s requires a Metal device on darwin/arm64 and a cgo build with -tags=metal (without purego): %w", operation, err)
 	}
-	var model = metalModel{device: device, attention: attention}
+	var model = metalModel{
+		device:       device,
+		attention:    attention,
+		weightDType:  options.WeightDType,
+		kvCacheDType: options.KVCacheDType,
+	}
 	decoder, generation, err = loadHFModel(ctx, dir, maxContext, &model)
 	if err != nil {
 		if closeErr := model.close(); closeErr != nil {
@@ -115,11 +138,16 @@ func loadHFCheckpoint(ctx context.Context, config Config, checkpoint *safetensor
 		return nil, fmt.Errorf("%d layers cannot be represented by only %d tensor descriptors", config.Layers, len(inventory))
 	}
 	decoder := &Decoder{config: config, blocks: make([]blockWeights, config.Layers), metal: metal}
+	var descriptors = checkpoint.Tensors()
 	if err = decoder.validateHFInventory(inventory); err != nil {
 		return nil, err
 	}
 	headWidth := config.Dim / config.Heads
-	if err = decoder.loadWeights(ctx, Weights{}, func(layer int, weight decoderWeight) (string, []float32, error) {
+	if metal != nil && metal.attention && metal.weightDType != 0 && metal.weightDType != gpu.Float32 {
+		if err = decoder.loadHFMetalWeights(ctx, checkpoint, descriptors, headWidth); err != nil {
+			return nil, err
+		}
+	} else if err = decoder.loadWeights(ctx, Weights{}, func(layer int, weight decoderWeight) (string, []float32, error) {
 		name := hfWeightName(layer, weight.name)
 		values, readErr := checkpoint.ReadFloat32(name)
 		if readErr != nil {
@@ -221,4 +249,63 @@ func interleaveRotaryRows(values []float32, headCount, headWidth, inputWidth int
 		}
 	}
 	return adjacent
+}
+
+func interleaveRotaryRowsUint16(values []uint16, headCount, headWidth, inputWidth int64) []uint16 {
+	adjacent := make([]uint16, len(values))
+	half := headWidth / 2
+	for head := range headCount {
+		base := head * headWidth
+		for pair := range half {
+			first := (base + pair) * inputWidth
+			second := (base + half + pair) * inputWidth
+			target := (base + 2*pair) * inputWidth
+			copy(adjacent[target:target+inputWidth], values[first:first+inputWidth])
+			copy(adjacent[target+inputWidth:target+2*inputWidth], values[second:second+inputWidth])
+		}
+	}
+	return adjacent
+}
+
+func (d *Decoder) loadHFMetalWeights(ctx context.Context, checkpoint *safetensors.File, descriptors map[string]safetensors.Tensor, headWidth int64) (err error) {
+	if err = d.visitWeights(Weights{}, func(layer int, weight decoderWeight) (readErr error) {
+		if readErr = ctx.Err(); readErr != nil {
+			return readErr
+		}
+		var (
+			name        = hfWeightName(layer, weight.name)
+			targetDType = d.metal.weightDTypeFor(weight.name)
+			descriptor  = descriptors[name]
+		)
+		if targetDType == gpu.BFloat16 && descriptor.DType == safetensors.BF16 {
+			var bits []uint16
+			if bits, readErr = checkpoint.ReadBFloat16Bits(name); readErr != nil {
+				return readErr
+			}
+			switch weight.name {
+			case "wq":
+				bits = interleaveRotaryRowsUint16(bits, d.config.Heads, headWidth, d.config.Dim)
+			case "wk":
+				bits = interleaveRotaryRowsUint16(bits, d.config.KVHeads, headWidth, d.config.Dim)
+			}
+			return weight.storeBFloat16Bits(name, bits, d.metal)
+		}
+		var values []float32
+		if values, readErr = checkpoint.ReadFloat32(name); readErr != nil {
+			return readErr
+		}
+		switch weight.name {
+		case "wq":
+			values = interleaveRotaryRows(values, d.config.Heads, headWidth, d.config.Dim)
+		case "wk":
+			values = interleaveRotaryRows(values, d.config.KVHeads, headWidth, d.config.Dim)
+		}
+		return weight.store(name, values, d.metal)
+	}); err != nil {
+		return err
+	}
+	if d.config.TieEmbeddings {
+		d.metalOutput = d.metalEmbedding
+	}
+	return nil
 }

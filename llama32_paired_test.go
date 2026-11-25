@@ -21,7 +21,35 @@ import (
 	"time"
 
 	"github.com/itsmontoya/llama/internal/tokenizer"
+	"github.com/itsmontoya/neuralnetwork/gpu"
 )
+
+func parsePairedMetalBackend(backend string) (opts MetalOptions, isMetal, strict bool, err error) {
+	switch backend {
+	case "cpu":
+		return MetalOptions{}, false, true, nil
+	case "metal":
+		return MetalOptions{WeightDType: gpu.Float32, KVCacheDType: gpu.Float32}, true, true, nil
+	case "metal-bf16":
+		return MetalOptions{WeightDType: gpu.BFloat16, KVCacheDType: gpu.Float32}, true, false, nil
+	case "metal-bf16-kv16":
+		return MetalOptions{WeightDType: gpu.BFloat16, KVCacheDType: gpu.Float16}, true, false, nil
+	case "metal-fp16":
+		return MetalOptions{WeightDType: gpu.Float16, KVCacheDType: gpu.Float32}, true, false, nil
+	case "metal-fp16-kv16":
+		return MetalOptions{WeightDType: gpu.Float16, KVCacheDType: gpu.Float16}, true, false, nil
+	case "metal-q8_0":
+		return MetalOptions{WeightDType: gpu.Q8_0, KVCacheDType: gpu.Float32}, true, false, nil
+	case "metal-q8_0-kv16":
+		return MetalOptions{WeightDType: gpu.Q8_0, KVCacheDType: gpu.Float16}, true, false, nil
+	case "metal-q4_0":
+		return MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float32}, true, false, nil
+	case "metal-q4_0-kv16":
+		return MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float16}, true, false, nil
+	default:
+		return MetalOptions{}, false, false, fmt.Errorf("unknown paired backend %q", backend)
+	}
+}
 
 type pairedLane struct {
 	PrefillNS   int64
@@ -86,16 +114,19 @@ func TestLlama32PairedCampaign(t *testing.T) {
 			}
 		}
 	}()
+	var metalOpts, isMetal, strictFP32, backendErr = parsePairedMetalBackend(backend)
+	if backendErr != nil {
+		t.Fatal(backendErr)
+	}
 	var loads []int64
 	var loadOne = func() (decoder *Decoder, generation HFGenerationConfig) {
 		var start = time.Now()
-		switch backend {
-		case "cpu":
+		if !isMetal {
 			decoder, generation, err = LoadHFModel(dir, 512)
-		case "metal":
+		} else if strictFP32 {
 			decoder, generation, err = LoadHFModelMetalAttention(t.Context(), dir, 512)
-		default:
-			t.Fatal("unknown paired backend", backend)
+		} else {
+			decoder, generation, err = LoadHFModelMetalAttentionWithOptions(t.Context(), dir, 512, metalOpts)
 		}
 		loads = append(loads, time.Since(start).Nanoseconds())
 		if err != nil {
@@ -175,16 +206,16 @@ func TestLlama32PairedCampaign(t *testing.T) {
 			continue
 		}
 		for _, tensor := range decoder.metal.weights {
-			var bytes = int64(4)
-			for _, dimension := range tensor.Shape() {
-				bytes *= dimension
-			}
-			modelBytes += bytes
+			modelBytes += int64(tensor.Bytes())
 		}
 	}
-	if backend == "metal" {
+	if isMetal {
 		var config = decoders[0].Config()
-		kvBytes = 16 * config.Layers * capacity * config.KVHeads * (config.Dim / config.Heads) * int64(laneCount)
+		var kvElemBytes = int64(4)
+		if metalOpts.KVCacheDType == gpu.Float16 {
+			kvElemBytes = 2
+		}
+		kvBytes = 4 * kvElemBytes * config.Layers * capacity * config.KVHeads * (config.Dim / config.Heads) * int64(laneCount)
 	}
 	var profile *os.File
 	if os.Getenv("LLAMA_PAIRED_PROFILE") == "1" {
@@ -198,7 +229,7 @@ func TestLlama32PairedCampaign(t *testing.T) {
 	}
 	var results [2]pairedPhase
 	for index := range results {
-		results[index] = runPairedPhase(t, decoders, laneCount, capacity, prompt, want, index == 0, work == "recovery", loadStart)
+		results[index] = runPairedPhase(t, decoders, laneCount, capacity, prompt, want, index == 0, work == "recovery", strictFP32, loadStart)
 	}
 	if profile != nil {
 		pprof.StopCPUProfile()
@@ -221,17 +252,27 @@ func TestLlama32PairedCampaign(t *testing.T) {
 				}
 				var label = fmt.Sprintf("phase %d lane %d", phase, i)
 				var observation = frozen[step]
-				var input = append(slices.Clone(prompt), want[:step]...)
-				if !slices.Equal(observation.InputIDs, input) {
-					t.Fatalf("position %d reference prefix mismatch", observation.Position)
+				var input = append(slices.Clone(prompt), lane.Winners[:step]...)
+				if strictFP32 {
+					if !slices.Equal(observation.InputIDs, input) {
+						t.Fatalf("position %d reference prefix mismatch", observation.Position)
+					}
+					var _, fraction = compareLlama32Row(t, label, input, row, observation)
+					result.MaxFrozenFrac = max(result.MaxFrozenFrac, fraction.fraction)
+				} else if slices.Equal(observation.InputIDs, input) {
+					for _, sample := range observation.Samples {
+						var diff = math.Abs(float64(row[sample.ID]) - sample.Logit)
+						var frac = diff / (1e-3 + 1e-3*math.Abs(sample.Logit))
+						result.MaxFrozenFrac = max(result.MaxFrozenFrac, frac)
+					}
 				}
-				var _, fraction = compareLlama32Row(t, label, input, row, observation)
-				result.MaxFrozenFrac = max(result.MaxFrozenFrac, fraction.fraction)
-				for _, sample := range observation.Samples {
-					result.FrozenErrors = append(result.FrozenErrors, math.Abs(float64(row[sample.ID])-sample.Logit))
-				}
-				if observation.Position == 11 {
-					result.NearTieMargin = append(result.NearTieMargin, float64(row[observation.Top[0].ID])-float64(row[observation.Top[1].ID]))
+				if slices.Equal(observation.InputIDs, input) {
+					for _, sample := range observation.Samples {
+						result.FrozenErrors = append(result.FrozenErrors, math.Abs(float64(row[sample.ID])-sample.Logit))
+					}
+					if observation.Position == 11 {
+						result.NearTieMargin = append(result.NearTieMargin, float64(row[observation.Top[0].ID])-float64(row[observation.Top[1].ID]))
+					}
 				}
 			}
 			if backend == "cpu" && hostDigest != "" {
@@ -293,7 +334,7 @@ func TestLlama32PairedCampaign(t *testing.T) {
 	fmt.Printf("LLAMA_RESULT %s\n", data)
 }
 
-func runPairedPhase(t *testing.T, decoders []*Decoder, laneCount int, capacity int64, prompt, want []int64, cold, recoverStep bool, loadStart time.Time) (out pairedPhase) {
+func runPairedPhase(t *testing.T, decoders []*Decoder, laneCount int, capacity int64, prompt, want []int64, cold, recoverStep, strict bool, loadStart time.Time) (out pairedPhase) {
 	t.Helper()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -319,7 +360,7 @@ func runPairedPhase(t *testing.T, decoders []*Decoder, laneCount int, capacity i
 			defer finished.Done()
 			ready.Done()
 			<-barrier
-			out.Lanes[lane] = runPairedLane(session, prompt, want, recoverStep, begin, func(ts time.Time, id int64) {
+			out.Lanes[lane] = runPairedLane(session, prompt, want, recoverStep, strict, begin, func(ts time.Time, id int64) {
 				if cold {
 					first.Do(func() {
 						fmt.Printf("LLAMA_FIRST %d %d\n", ts.Sub(loadStart).Nanoseconds(), id)
@@ -347,7 +388,7 @@ func runPairedPhase(t *testing.T, decoders []*Decoder, laneCount int, capacity i
 	return out
 }
 
-func runPairedLane(session *Session, prompt, want []int64, recovery bool, barrier time.Time, first func(time.Time, int64)) (out pairedLane) {
+func runPairedLane(session *Session, prompt, want []int64, recovery, strict bool, barrier time.Time, first func(time.Time, int64)) (out pairedLane) {
 	out.Rows = make([][]float32, 0, len(want))
 	out.Winners = make([]int64, 0, len(want))
 	out.DecodeNS = make([]int64, 0, len(want)-1)
@@ -361,7 +402,7 @@ func runPairedLane(session *Session, prompt, want []int64, recovery bool, barrie
 			return out
 		}
 		var winner, selectErr = greedyToken(row)
-		if selectErr != nil || winner != expected {
+		if selectErr != nil || (strict && winner != expected) {
 			out.Err = fmt.Errorf("position %d winner %d, want %d, error %v", session.Position()-1, winner, expected, selectErr)
 			return out
 		}
