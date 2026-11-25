@@ -31,11 +31,14 @@ def write_overlay(run):
         ("var model = metalModel", 'fmt.Printf("LL04 HOST device_open 0 %d\\n", time.Since(phase).Nanoseconds())\n\tvar model = metalModel'),
     ])
     instrument("metal_model.go", [
-        ("var weight *gpu.Tensor", "var phase = time.Now()\n\tvar weight *gpu.Tensor"),
+        ("func (m *metalModel) upload(shape []int64, values []float32) (out *gpu.Tensor, err error) {\n\tvar weight *gpu.Tensor", "func (m *metalModel) upload(shape []int64, values []float32) (out *gpu.Tensor, err error) {\n\tvar phase = time.Now()\n\tvar weight *gpu.Tensor"),
         ("if err = weight.Upload(values)", '''fmt.Printf("LL04 HOST model_allocate %d %d\\n", len(values)*4, time.Since(phase).Nanoseconds())
 	phase = time.Now()
 	if err = weight.Upload(values)'''),
-        ("m.weights = append", '''fmt.Printf("LL04 HOST model_upload %d %d\\n", len(values)*4, time.Since(phase).Nanoseconds())
+        ("if err = weight.Upload(values); err != nil {\n\t\treturn nil, errors.Join(err, weight.Close())\n\t}\n\tm.weights = append", '''if err = weight.Upload(values); err != nil {
+		return nil, errors.Join(err, weight.Close())
+	}
+	fmt.Printf("LL04 HOST model_upload %d %d\\n", len(values)*4, time.Since(phase).Nanoseconds())
 	m.weights = append'''),
     ])
     instrument("metal_attention.go", [
