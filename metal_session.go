@@ -16,7 +16,7 @@ func (m *metalModel) newSession(config Config, capacity int64) (out *metalSessio
 		return nil, fmt.Errorf("llama: Metal attention: %w", gpu.ErrClosed)
 	}
 	var caches []*gpu.KVCache
-	if caches, err = newMetalCaches(m.device, config, capacity); err != nil {
+	if caches, err = newMetalCaches(m.device, config, capacity, m.effectiveKVCacheDType()); err != nil {
 		return nil, err
 	}
 	var state = &metalSession{caches: caches}
@@ -29,14 +29,22 @@ func (m *metalModel) newSession(config Config, capacity int64) (out *metalSessio
 	return state, nil
 }
 
-func newMetalCaches(device *gpu.Device, config Config, capacity int64) (out []*gpu.KVCache, err error) {
+func newMetalCaches(device *gpu.Device, config Config, capacity int64, dtype gpu.DType) (out []*gpu.KVCache, err error) {
 	var width = config.Dim / config.Heads
 	if _, _, err = tensor.ValidateShape([]int64{4, config.Layers, capacity, config.KVHeads, width}, tensor.Float32); err != nil {
 		return nil, fmt.Errorf("llama: Metal session KV storage: %w", err)
 	}
+	if dtype == 0 {
+		dtype = gpu.Float32
+	}
 	var caches = make([]*gpu.KVCache, config.Layers)
 	for layer := range caches {
-		if caches[layer], err = gpu.NewKVCache(device, capacity, config.KVHeads, width); err != nil {
+		if dtype == gpu.Float32 {
+			caches[layer], err = gpu.NewKVCache(device, capacity, config.KVHeads, width)
+		} else {
+			caches[layer], err = gpu.NewKVCacheWithDType(device, capacity, config.KVHeads, width, dtype)
+		}
+		if err != nil {
 			closeMetalCaches(caches)
 			return nil, fmt.Errorf("llama: allocate Metal KV cache for layer %d: %w", layer, err)
 		}

@@ -87,7 +87,7 @@ func (d *Decoder) forwardMetalPrefix(ctx context.Context, tokens []int64) (out *
 	}
 
 	var caches []*gpu.KVCache
-	if caches, err = newMetalCaches(m.device, d.config, int64(len(tokens))); err != nil {
+	if caches, err = newMetalCaches(m.device, d.config, int64(len(tokens)), m.effectiveKVCacheDType()); err != nil {
 		return nil, err
 	}
 	defer closeMetalCaches(caches)

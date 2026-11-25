@@ -119,3 +119,33 @@ func TestReadFloat32RejectsShortReads(t *testing.T) {
 		})
 	}
 }
+
+func TestReadBFloat16Bits(t *testing.T) {
+	want := []uint16{0x0000, 0x8000, 0x3f80, 0xc1c0, 0x0001, 0x7f7f, 0x7f80, 0x7fc1}
+	var payload []byte
+	for _, bits := range want {
+		payload = binary.LittleEndian.AppendUint16(payload, bits)
+	}
+	payload = binary.LittleEndian.AppendUint32(payload, 0x3f800000)
+	header := fmt.Sprintf(`{
+		"bf":{"dtype":"BF16","shape":[%d],"data_offsets":[0,%d]},
+		"f32":{"dtype":"F32","shape":[1],"data_offsets":[%d,%d]}
+	}`, len(want), len(want)*2, len(want)*2, len(payload))
+	archive := openArchive(t, writeArchive(t, header, payload))
+
+	got, err := archive.ReadBFloat16Bits("bf")
+	if err != nil || len(got) != len(want) {
+		t.Fatalf("ReadBFloat16Bits(bf) = %d values, err %v, want %d values", len(got), err, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("element %d: got 0x%04x, want 0x%04x", i, got[i], want[i])
+		}
+	}
+	if _, err = archive.ReadBFloat16Bits("f32"); err == nil || !strings.Contains(err.Error(), "want BF16") {
+		t.Fatalf("ReadBFloat16Bits(f32) = %v, want dtype error", err)
+	}
+	if _, err = archive.ReadBFloat16Bits("missing"); err == nil || !strings.Contains(err.Error(), `unknown tensor "missing"`) {
+		t.Fatalf("ReadBFloat16Bits(missing) = %v, want unknown tensor error", err)
+	}
+}
