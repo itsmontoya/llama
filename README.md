@@ -1,7 +1,7 @@
 # llama
 
 A tiny FP32 Llama-style decoder built on
-[`neuralnetwork v0.10.13`](https://github.com/itsmontoya/neuralnetwork/tree/v0.10.13).
+[`neuralnetwork v0.11.3`](https://github.com/itsmontoya/neuralnetwork/tree/v0.11.3).
 This is the numerical baseline for a Go inference runtime. It evaluates a
 complete token prefix with batch size one and returns logits for every position.
 
@@ -115,8 +115,21 @@ session is finished, and `Decoder.Close` to release the model and any
 remaining device caches. `Forward` returns every logit row for diagnostics.
 `ForwardWithTrace` requires attention probabilities and is available through
 the CPU and FFN-only modes. The Metal loader uploads tied embedding and
-classifier weights once into a shared allocation. See the [FP32 Metal
-handoff](METAL_FP32_HANDOFF.md) for validation, memory use, and timings.
+classifier weights once into a shared allocation.
+
+**Experimental status and performance tradeoffs:** CPU remains the default and
+authoritative baseline; Metal is explicitly opt-in and its `neuralnetwork/gpu`
+integration API is experimental. On Apple M3 with `neuralnetwork v0.11.3`
+(which preserves `v0.11.2`'s FP32 Metal fast path after NN-08's negative result
+under full-row FP32 near-zero logit tolerances), resident Metal shortened warmed
+27–29-token prefill by **26–29%** (`299.5–319.5 ms` vs `405.1–436.3 ms` on CPU),
+while warmed single-row FP32 decode remained **31–34% slower** than ARM64 NEON
+CPU (`88.5–90.1 ms/call` vs `66.5–68.2 ms/call`; `11.1–11.3` vs `14.6–15.0`
+tokens/s). Requesting Metal on non-Darwin, `CGO_ENABLED=0`, `purego`, or
+Metal-unavailable hosts returns an explicit availability error rather than
+silently falling back to CPU. See the [final FP32 GPU baseline](GPU_BASELINE.md)
+and the [LL-04 performance report](GPU_PERFORMANCE_REPORT.md) for full
+reproducibility data, memory accounting, and tolerances.
 
 ### Ask questions in the terminal
 
