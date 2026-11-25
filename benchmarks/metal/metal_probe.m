@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <time.h>
 
-static const NSUInteger maxEncoders = 256;
+static const NSUInteger maxEncoders = 512;
 static char commandKey, encoderKey, pipelineKey;
 static _Atomic uint64_t nextCommand = 0;
 static BOOL sampleStages;
@@ -93,7 +93,7 @@ static void hookEncoder(id<MTLComputeCommandEncoder> encoder) {
 		}));
 		hook(cls, setBytes, imp_implementationWithBlock(^(id object, const void *bytes, NSUInteger length, NSUInteger index) {
 			LL04Encoder *event = objc_getAssociatedObject(object, &encoderKey);
-			if (index == 3 && length == sizeof(MatMulDimensions) && [event.name isEqualToString:@"nn_matmul"]) {
+			if (index == 3 && length == sizeof(MatMulDimensions) && [event.name hasPrefix:@"nn_matmul"]) {
 				MatMulDimensions dimensions;
 				memcpy(&dimensions, bytes, sizeof(dimensions));
 				event.dimensions = dimensions;

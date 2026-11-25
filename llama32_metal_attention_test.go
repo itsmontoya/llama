@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/itsmontoya/llama/internal/tokenizer"
+	"github.com/itsmontoya/neuralnetwork/gpu"
 )
 
 func TestLlama32MetalAttention(t *testing.T) {
@@ -99,4 +100,70 @@ func TestLlama32MetalAttention(t *testing.T) {
 
 func BenchmarkLlama32MetalAttentionCachedGeneration(b *testing.B) {
 	benchmarkLlama32CachedGeneration(b, LoadHFModelMetalAttention)
+}
+
+func TestLlama32MetalReducedPrecision(t *testing.T) {
+	var dir = os.Getenv("LLAMA_32_1B_MODEL_DIR")
+	if dir == "" {
+		t.Skip("set LLAMA_32_1B_MODEL_DIR to the pinned Meta snapshot")
+	}
+	verifyLlama32Snapshot(t, dir)
+	var model, err = readHFConfig(dir, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vocab *tokenizer.Llama3Tokenizer
+	if vocab, err = tokenizer.LoadLlama3(dir, model.decoder.VocabSize, model.generation.BOSID, model.generation.StopIDs); err != nil {
+		t.Fatal(err)
+	}
+	var prompt []int64
+	if prompt, err = vocab.Encode(llama32ShortPrompt); err != nil || len(prompt) != 6 {
+		t.Fatalf("short prompt IDs %v, error %v", prompt, err)
+	}
+	var wantShort = []int64{12366, 13, 1102, 374, 279, 1455, 95551, 3363}
+
+	for _, tc := range []struct {
+		name           string
+		opts           MetalOptions
+		wantModelBytes uint64
+		requireExact   bool
+	}{
+		{"bf16_kv32", MetalOptions{WeightDType: gpu.BFloat16, KVCacheDType: gpu.Float32}, 2_471_759_872, true},
+		{"bf16_kv16", MetalOptions{WeightDType: gpu.BFloat16, KVCacheDType: gpu.Float16}, 2_471_759_872, true},
+		{"fp16_kv32", MetalOptions{WeightDType: gpu.Float16, KVCacheDType: gpu.Float32}, 2_471_759_872, true},
+		{"fp16_kv16", MetalOptions{WeightDType: gpu.Float16, KVCacheDType: gpu.Float16}, 2_471_759_872, true},
+		{"q8_0_kv32", MetalOptions{WeightDType: gpu.Q8_0, KVCacheDType: gpu.Float32}, 1_559_633_920, true},
+		{"q4_0_kv32", MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float32}, 1_073_094_656, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var decoder, _, loadErr = LoadHFModelMetalAttentionWithOptions(t.Context(), dir, 512, tc.opts)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			defer func() {
+				if closeErr := decoder.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+			}()
+			var totalBytes uint64
+			for _, w := range decoder.metal.weights {
+				totalBytes += w.Bytes()
+			}
+			if totalBytes != tc.wantModelBytes {
+				t.Fatalf("device model bytes = %d, want %d", totalBytes, tc.wantModelBytes)
+			}
+			var got, genErr = decoder.GenerateGreedyCached(prompt, 8, model.generation.StopIDs...)
+			if genErr != nil {
+				t.Fatal(genErr)
+			}
+			var text, decErr = vocab.Decode(got)
+			if decErr != nil {
+				t.Fatal(decErr)
+			}
+			t.Logf("%s: model_bytes=%d suffix=%v text=%q", tc.name, totalBytes, got, text)
+			if tc.requireExact && !slices.Equal(got, wantShort) {
+				t.Fatalf("%s: got %v (%q), want %v", tc.name, got, text, wantShort)
+			}
+		})
+	}
 }

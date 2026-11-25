@@ -109,21 +109,26 @@ def main():
     args = parser.parse_args()
     run = args.run.resolve()
     plan = json.loads((run / "plan.json").read_text())
+    metal_backend = plan.get("metal_backend", "metal")
+    strict_fp32 = metal_backend == "metal"
     order = {(event["case"], event["pair"]): event["order"] for event in
              map(json.loads, (run / "order.jsonl").read_text().splitlines())}
     compare = run / "compare_rows"
     source = Path(__file__).with_name("compare_rows.c")
     subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(compare)], check=True)
     records, paired_records = [], []
-    frozen = {"cpu": [], "metal": []}
-    fractions = {"cpu": [], "metal": []}
-    margins = {"cpu": [], "metal": []}
+    frozen = {"cpu": [], metal_backend: []}
+    fractions = {"cpu": [], metal_backend: []}
+    margins = {"cpu": [], metal_backend: []}
     for work in plan["cases"]:
-        samples = {"cpu": [], "metal": []}
+        samples = {"cpu": [], metal_backend: []}
         paired = []
+        greedy_matches = 0
+        greedy_total = 0
+        metal_winners_sample = None
         for pair in range(1, plan["pairs"] + 1):
             cpu, cpu_path = read_sample(work, pair, "cpu", run)
-            metal, metal_path = read_sample(work, pair, "metal", run)
+            metal, metal_path = read_sample(work, pair, metal_backend, run)
             lane_count = len(cpu["phases"][0]["Lanes"])
             row_count = len(cpu["phases"][0]["Lanes"][0]["Winners"])
             require(cpu["prompt_ids"] == metal["prompt_ids"] and cpu["capacity"] == metal["capacity"],
@@ -132,8 +137,15 @@ def main():
                     f"{work} pair {pair}: invalid CPU/Metal model residency")
             for left, right in zip(cpu["phases"], metal["phases"], strict=True):
                 for a, b in zip(left["Lanes"], right["Lanes"], strict=True):
-                    require(a["Winners"] == b["Winners"] and len(a["Winners"]) == row_count,
-                            f"{work} pair {pair}: greedy mismatch")
+                    require(len(a["Winners"]) == len(b["Winners"]) == row_count,
+                            f"{work} pair {pair}: greedy length mismatch")
+                    if strict_fp32:
+                        require(a["Winners"] == b["Winners"],
+                                f"{work} pair {pair}: greedy mismatch")
+                    if metal_winners_sample is None:
+                        metal_winners_sample = b["Winners"]
+                    greedy_matches += sum(1 for x, y in zip(a["Winners"], b["Winners"]) if x == y)
+                    greedy_total += row_count
             errors = json.loads(output(str(compare), str(cpu_path), str(metal_path), str(row_count), str(lane_count)))
             metrics = {}
             for sample in (cpu, metal):
@@ -147,28 +159,33 @@ def main():
                     fractions[backend].append(phase["MaxFrozenFrac"])
                     margins[backend].extend(phase["NearTieMargin"] or [])
             changes = {"case": work, "pair": pair, "order": "-".join(order[work, pair]), **errors}
-            changes.update({name: metrics["metal"][name] / value - 1 for name, value in metrics["cpu"].items() if value})
+            changes.update({name: metrics[metal_backend][name] / value - 1 for name, value in metrics["cpu"].items() if value})
             paired.append(changes)
             paired_records.append(changes)
-        print(f"\n{work} ({len(paired)} pairs)")
-        print("| metric | CPU median (range) | Metal median (range) | paired Metal/CPU − 1, % |")
+        print(f"\n{work} ({len(paired)} pairs, metal={metal_backend}, greedy match {greedy_matches}/{greedy_total})")
+        print(f"| metric | CPU median (range) | {metal_backend} median (range) | paired Metal/CPU − 1, % |")
         print("| --- | ---: | ---: | ---: |")
         for metric in samples["cpu"][0]:
             cpu_values = [row[metric] for row in samples["cpu"]]
-            gpu_values = [row[metric] for row in samples["metal"]]
+            gpu_values = [row[metric] for row in samples[metal_backend]]
             pair_changes = [100 * row[metric] for row in paired if metric in row]
             print(f"| {metric} | {span(cpu_values)} | {span(gpu_values)} | {span(pair_changes) if pair_changes else '—'} |")
-        print("FP32 unique trajectory error across pairs (median and range): " +
+        print(f"{metal_backend} unique trajectory error across pairs (median and range): " +
               ", ".join(f"{key} {span([row[key] for row in paired])}" for key in ("p50", "p95", "max", "rmse", "max_fraction")))
+        if not strict_fp32 and metal_winners_sample is not None:
+            print(f"{metal_backend} greedy winners: {metal_winners_sample}")
     print(f"\nPaired logits compared: {sum(row['values'] for row in paired_records):,}")
-    for backend in ("cpu", "metal"):
+    for backend in ("cpu", metal_backend):
         errors = frozen[backend]
-        print(f"{backend} frozen n={len(errors):,}, p50={percentile(errors, .5):.9g}, p95={percentile(errors, .95):.9g}, "
-              f"max={max(errors):.9g}, max fraction={max(fractions[backend]):.9g}, position 11 margin {span(margins[backend])}")
+        if errors:
+            margin_str = span(margins[backend]) if margins[backend] else "n/a"
+            print(f"{backend} frozen n={len(errors):,}, p50={percentile(errors, .5):.9g}, p95={percentile(errors, .95):.9g}, "
+                  f"max={max(errors):.9g}, max fraction={max(fractions[backend]):.9g}, position 11 margin {margin_str}")
     write_csv(run / "samples.csv", records)
     write_csv(run / "pairs.csv", paired_records)
-    failed = [f"{row['case']} pair {row['pair']}" for row in paired_records if row["violations"]]
-    require(not failed, f"logit tolerance exceeded in {', '.join(failed)}")
+    if strict_fp32:
+        failed = [f"{row['case']} pair {row['pair']}" for row in paired_records if row["violations"]]
+        require(not failed, f"logit tolerance exceeded in {', '.join(failed)}")
 
 
 if __name__ == "__main__":
