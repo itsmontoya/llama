@@ -50,10 +50,10 @@ func LoadHFModelMetalAttention(ctx context.Context, dir string, maxContext int64
 // Q8_0, and Q4_0. Supported KVCacheDType values are 0 (Float32), Float32, and
 // Float16. Native BF16 checkpoints upload directly to BFloat16 device tensors
 // without FP32 upcast. In quantized weight modes (Q8_0/Q4_0), transformer
-// projections use the quantized dtype while norms remain Float32 and embeddings
-// (including tied embedding/classifier tables) use BFloat16 for GatherRows
-// compatibility. Unavailable builds or devices return an error wrapping
-// gpu.ErrUnavailable; invalid options return an error wrapping gpu.ErrInvalid.
+// projections and embeddings (including tied embedding/classifier tables) use
+// the quantized dtype while norms remain Float32. Unavailable builds or devices
+// return an error wrapping gpu.ErrUnavailable; invalid options return an error
+// wrapping gpu.ErrInvalid.
 func LoadHFModelMetalAttentionWithOptions(ctx context.Context, dir string, maxContext int64, options MetalOptions) (decoder *Decoder, generation HFGenerationConfig, err error) {
 	var resolved MetalOptions
 	if resolved, err = options.resolve(); err != nil {

@@ -132,8 +132,8 @@ func TestLlama32MetalReducedPrecision(t *testing.T) {
 		{"bf16_kv16", MetalOptions{WeightDType: gpu.BFloat16, KVCacheDType: gpu.Float16}, 2_471_759_872, true},
 		{"fp16_kv32", MetalOptions{WeightDType: gpu.Float16, KVCacheDType: gpu.Float32}, 2_471_759_872, true},
 		{"fp16_kv16", MetalOptions{WeightDType: gpu.Float16, KVCacheDType: gpu.Float16}, 2_471_759_872, true},
-		{"q8_0_kv32", MetalOptions{WeightDType: gpu.Q8_0, KVCacheDType: gpu.Float32}, 1_559_633_920, true},
-		{"q4_0_kv32", MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float32}, 1_073_094_656, false},
+		{"q8_0_kv32", MetalOptions{WeightDType: gpu.Q8_0, KVCacheDType: gpu.Float32}, 1_313_382_400, true},
+		{"q4_0_kv32", MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float32}, 695_508_992, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var decoder, _, loadErr = LoadHFModelMetalAttentionWithOptions(t.Context(), dir, 512, tc.opts)
