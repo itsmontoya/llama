@@ -232,9 +232,6 @@ func TestMetalAttentionReducedPrecisionSynthetic(t *testing.T) {
 						t.Fatalf("gate weight dtype = %v, want %v", got, mode.opts.WeightDType)
 					}
 					var wantEmbDType = mode.opts.WeightDType
-					if mode.opts.WeightDType.IsQuantized() {
-						wantEmbDType = gpu.BFloat16
-					}
 					if got := decoder.metalEmbedding.DType(); got != wantEmbDType {
 						t.Fatalf("embedding dtype = %v, want %v", got, wantEmbDType)
 					}

@@ -71,11 +71,6 @@ func (m *metalModel) weightDTypeFor(name string) gpu.DType {
 		switch name {
 		case "attention_norm", "ffn_norm", "final_norm":
 			return gpu.Float32
-		case "token_embedding":
-			// GatherRows rejects Q8_0/Q4_0; keep embeddings (including tied
-			// embedding/classifier tables) in BFloat16 for single-allocation
-			// GatherRows and classifier compatibility.
-			return gpu.BFloat16
 		}
 	}
 	return m.weightDType
