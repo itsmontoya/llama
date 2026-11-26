@@ -1,7 +1,7 @@
 # llama
 
 A tiny Llama-style decoder built on
-[`neuralnetwork v0.12.1`](https://github.com/itsmontoya/neuralnetwork/tree/v0.12.1).
+[`neuralnetwork v0.13.3`](https://github.com/itsmontoya/neuralnetwork/tree/v0.13.3).
 This is the numerical baseline for a Go inference runtime. It evaluates a
 complete token prefix with batch size one and returns logits for every position.
 
@@ -104,13 +104,13 @@ weights (`float32`, `float16`, `bfloat16`, `q8_0`, `q4_0`) and optional
   -hf-model-dir "$model_dir" -context 512 \
   -prompt 'The capital of France is' -max-new-tokens 8
 
-# Native BF16 direct upload (recommended GPU mode: 2.0x CPU decode, 50% memory, exact greedy)
+# Native BF16 direct upload (recommended GPU mode: 2.3x CPU decode, 50% memory, exact greedy)
 "$bin_dir/generate-metal" -ffn-backend metal -attention-backend metal \
   -metal-weight-dtype bfloat16 -metal-kv-dtype float16 \
   -hf-model-dir "$model_dir" -context 512 \
   -prompt 'The capital of France is' -max-new-tokens 8
 
-# Host-packed Q8_0 (2.9x CPU decode, 1.45 GiB device, exact 33/33 greedy) or Q4_0 (3.9x CPU, 1.00 GiB)
+# Host-packed Q8_0 (4.0x CPU decode, 1.22 GiB device, exact 33/33 greedy) or Q4_0 (7.0x CPU, 0.65 GiB)
 "$bin_dir/generate-metal" -ffn-backend metal -attention-backend metal \
   -metal-weight-dtype q8_0 \
   -hf-model-dir "$model_dir" -context 512 \
@@ -132,23 +132,22 @@ KVCacheDType}`. Call `Session.Close` when a cached session is finished, and
 returns every logit row for diagnostics. `ForwardWithTrace` requires attention
 probabilities and is available through the CPU and FFN-only modes. The Metal
 loader uploads tied embedding and classifier weights once into a shared
-allocation (kept in `BFloat16` for `Q8_0`/`Q4_0` modes for `GatherRows`
-compatibility).
+allocation (including `Q8_0`/`Q4_0` via `Scope.GatherRows` dequantization).
 
-**Experimental status and precision tradeoffs (Apple M3, `neuralnetwork v0.12.1`):**
+**Experimental status and precision tradeoffs (Apple M3, `neuralnetwork v0.13.3`):**
 CPU remains the default and authoritative baseline; Metal is explicitly opt-in.
-With `v0.12.1`'s parallel SIMD `RMSNorm` (`18.51 → 0.22 ms`) and reduced-precision
-kernels, paired alternating fresh-process benchmarks on Llama 3.2 1B show:
+With `v0.13.3`'s parallel SIMD `CausalAttention` (`3.68 → 0.13 ms`) and
+quantized tied embedding/classifier (`Q8_0`/`Q4_0`), paired alternating
+fresh-process benchmarks on Llama 3.2 1B show:
 
 | Mode | Device Weights | Sustained Decode | 27–29 Prefill | Shared 2-Lane | Greedy (33 steps) |
 | --- | ---: | ---: | ---: | ---: | :---: |
-| CPU NEON FP32 (default) | — (4.60 GiB host) | 14.8 tok/s (`67.1 ms`) | 387–443 ms | 17.6 tok/s | 33/33 |
-| Metal FP32 | 4.60 GiB | 13.8 tok/s (`72.3 ms`) | 281–302 ms (−31–33%) | 16.5 tok/s | 33/33 |
-| Metal BF16 (native) | **2.30 GiB (−50%)** | **30.1 tok/s (2.0×)** | **113–121 ms (−71–72%)** | **33.1 tok/s (+86%)** | **33/33** |
-| Metal BF16 + FP16 KV | **2.30 GiB** (KV −50%) | **30.2 tok/s (2.0×)** | **112–121 ms (−71–73%)** | **32.7 tok/s (+83%)** | **33/33** |
-| Metal FP16 | 2.30 GiB (−50%) | 28.8 tok/s (1.9×) | 112–120 ms (−72–74%) | 32.9 tok/s (+87%) | **33/33** |
-| Metal Q8_0 | **1.45 GiB (−68%)** | **43.2 tok/s (2.9×)** | 131–140 ms (−67–69%) | **49.1 tok/s (+178%)** | **33/33** |
-| Metal Q4_0 | **1.00 GiB (−78%)** | **56.9 tok/s (3.9×)** | 145–155 ms (−63–64%) | **67.0 tok/s (+281%)** | 2/33 (diverges at tok 3) |
+| CPU NEON FP32 (default) | — (4.60 GiB host) | 15.0 tok/s (`66.7 ms`) | 386–457 ms | 17.9 tok/s | 33/33 |
+| Metal FP32 | 4.60 GiB | 15.0 tok/s (`66.6 ms`) | 271–291 ms (−30–35%) | 17.4 tok/s | 33/33 |
+| Metal BF16 (native) | **2.30 GiB (−50%)** | **34.1 tok/s (2.3×)** | **108–115 ms (−72–75%)** | **33.7 tok/s (+90%)** | **33/33** |
+| Metal BF16 + FP16 KV | **2.30 GiB** (KV −50%) | **33.8 tok/s (2.3×)** | **109–116 ms (−72–73%)** | **35.0 tok/s (+96%)** | **33/33** |
+| Metal Q8_0 | **1.22 GiB (−73%)** | **59.7 tok/s (4.0×)** | 124–132 ms (−68–69%) | **64.5 tok/s (+261%)** | **33/33** |
+| Metal Q4_0 | **0.65 GiB (−86%)** | **104.9 tok/s (7.0×)** | 137–147 ms (−65–68%) | **118.0 tok/s (+569%)** | 2/33 (diverges at tok 3) |
 
 Requesting Metal on non-Darwin, `CGO_ENABLED=0`, `purego`, or
 Metal-unavailable hosts returns an explicit availability error rather than
