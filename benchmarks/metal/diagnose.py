@@ -42,15 +42,15 @@ def write_overlay(run):
 	m.weights = append'''),
     ])
     instrument("metal_attention.go", [
-        ("if scratch, err = newMetalAttentionScratch", "var phase = time.Now()\n\tif scratch, err = newMetalAttentionScratch"),
+        ("if scratch, err = newMetalAttentionScratch", "var scratchPhase = time.Now()\n\tif scratch, err = newMetalAttentionScratch"),
         ("defer scratch.close()", '''var config = d.config
 	var bytes = 4*(rows*(8*config.Dim + 3*config.KVHeads*(config.Dim/config.Heads) + 3*config.FFNDim) + logitRows*config.VocabSize)
 	if scratch.last != nil {
 		bytes += 4*config.Dim
 	}
-	fmt.Printf("LL04 HOST scratch_allocate %d %d\\n", bytes, time.Since(phase).Nanoseconds())
+	fmt.Printf("LL04 HOST scratch_allocate %d %d\\n", bytes, time.Since(scratchPhase).Nanoseconds())
 	defer scratch.close()'''),
-        ("if err = scratch.logits.DownloadInto", "phase = time.Now()\n\tif err = scratch.logits.DownloadInto"),
+        ("if err = scratch.logits.DownloadInto", "var phase = time.Now()\n\tif err = scratch.logits.DownloadInto"),
         ("return out, nil\n}\n\nfunc (d *Decoder) runMetalScope", '''fmt.Printf("LL04 HOST logits_download %d %d\\n", len(out)*4, time.Since(phase).Nanoseconds())
 	return out, nil
 }

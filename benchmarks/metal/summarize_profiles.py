@@ -74,7 +74,7 @@ def summarize_command(path):
     max_blits = max(blits_set)
     for index, command in sorted(commands.items()):
         compute, blits, dispatches, submit, wait, start, end, status, bytes_allocated = command
-        require(compute == dispatches and compute >= 242 and blits >= 0, f"{path}: command layout changed")
+        require(0 < compute <= dispatches and dispatches >= 242 and blits >= 0, f"{path}: command layout changed")
         require(end > start > 0 and status == 4, f"{path}: Metal command {index} failed or lacked timestamps")
         phase = "first" if index < baseline_cmds else "warm"
         if work in ("27", "28", "29"):

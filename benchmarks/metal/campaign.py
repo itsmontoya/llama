@@ -50,11 +50,11 @@ def verify_snapshot(model):
 
 def verify_module():
     selected = json.loads(output("go", "list", "-m", "-json", MODULE))
-    require(selected["Version"] == "v0.13.3" and not selected.get("Replace"), "LL-07 module pin mismatch")
-    release = json.loads(output("go", "mod", "download", "-json", f"{MODULE}@v0.13.3"))
-    require(release["Sum"] == "h1:jG/KLENaNXrZO2hKBllVzzPeT25gZlxXmZrNor3CYMM=", "module checksum mismatch")
+    require(selected["Version"] == "v0.17.0" and not selected.get("Replace"), "LL-08 module pin mismatch")
+    release = json.loads(output("go", "mod", "download", "-json", f"{MODULE}@v0.17.0"))
+    require(release["Sum"] == "h1:N/Tnl5xq8/E2dIjL3Ui0nYDV+9WkQoKc/+hlGhYmx58=", "module checksum mismatch")
     require(release["GoModSum"] == "h1:SafbkuDehVErsuJAL5FHFsLhKJbeh/OI3ItvbmwDafw=", "go.mod checksum mismatch")
-    require(release.get("Origin", {}).get("Hash") == "2b0a5f7f9fd4f7eff5f99a77d34818d7e3fa524f",
+    require(release.get("Origin", {}).get("Hash") == "0567cf1157df78b38633d9cf7beb90c539204727",
             "module tag origin mismatch")
     return release
 
@@ -131,7 +131,8 @@ def main():
                         choices=("metal", "metal-bf16", "metal-bf16-kv16",
                                  "metal-fp16", "metal-fp16-kv16",
                                  "metal-q8_0", "metal-q8_0-kv16",
-                                 "metal-q4_0", "metal-q4_0-kv16"))
+                                 "metal-q4_0", "metal-q4_0-kv16",
+                                 "metal-q4_1", "metal-q4_1-kv16"))
     args = parser.parse_args()
     require(args.pairs > 0 and args.cooldown >= 0, "positive pairs and nonnegative cooldown required")
     require(Path("llama32_paired_test.go").is_file(), "run from the Llama repository root")
