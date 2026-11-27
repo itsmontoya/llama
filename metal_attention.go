@@ -94,7 +94,7 @@ func (d *Decoder) forwardMetalPrefix(ctx context.Context, tokens []int64) (out *
 	var updates = make([]*gpu.KVAppend, len(caches))
 	defer discardMetalAppends(updates)
 	var values []float32
-	if values, err = d.metalLogits(ctx, tokens, 0, caches, updates, false); err != nil {
+	if values, err = d.metalLogits(ctx, tokens, 0, caches, updates, nil, false); err != nil {
 		return nil, err
 	}
 	if out, err = tensor.FromFloat32([]int64{int64(len(tokens)), d.config.VocabSize}, values); err != nil {
@@ -108,22 +108,24 @@ func (d *Decoder) forwardMetalPrefix(ctx context.Context, tokens []int64) (out *
 
 // metalLogits is shared by full-prefix inference, prefill and decode. The caller
 // owns the model read lock, private caches and cleanup of each staged append.
-func (d *Decoder) metalLogits(ctx context.Context, tokens []int64, position int64, caches []*gpu.KVCache, updates []*gpu.KVAppend, lastOnly bool) (out []float32, err error) {
+// When scratch is nil, a temporary scratch is allocated and closed per call.
+func (d *Decoder) metalLogits(ctx context.Context, tokens []int64, position int64, caches []*gpu.KVCache, updates []*gpu.KVAppend, scratch *metalAttentionScratch, lastOnly bool) (out []float32, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
 	var (
 		rows      = int64(len(tokens))
 		logitRows = rows
-		scratch   *metalAttentionScratch
 	)
 	if lastOnly {
 		logitRows = 1
 	}
-	if scratch, err = newMetalAttentionScratch(d.metal.device, d.config, rows, logitRows); err != nil {
-		return nil, fmt.Errorf("llama: allocate Metal attention scratch: %w", err)
+	if scratch == nil {
+		if scratch, err = newMetalAttentionScratch(d.metal.device, d.config, rows, logitRows); err != nil {
+			return nil, fmt.Errorf("llama: allocate Metal attention scratch: %w", err)
+		}
+		defer scratch.close()
 	}
-	defer scratch.close()
 
 	if err = d.runMetalScope(ctx, scratch, tokens, position, caches, updates); err != nil {
 		return nil, err

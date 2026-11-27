@@ -61,9 +61,36 @@ func closeMetalCaches(caches []*gpu.KVCache) {
 // metalSession serializes steps, position reads, resets and cleanup. It is
 // shared by any copies of the Session handle. A nil cache slice means closed.
 type metalSession struct {
-	mu       sync.Mutex
-	position int64
-	caches   []*gpu.KVCache
+	mu               sync.Mutex
+	position         int64
+	caches           []*gpu.KVCache
+	scratch          *metalAttentionScratch
+	scratchRows      int64
+	scratchLogitRows int64
+}
+
+func (s *metalSession) acquireScratch(device *gpu.Device, config Config, rows, logitRows int64) (*metalAttentionScratch, error) {
+	if s.scratch != nil && s.scratchRows == rows && s.scratchLogitRows == logitRows {
+		return s.scratch, nil
+	}
+	s.closeScratch()
+	scratch, err := newMetalAttentionScratch(device, config, rows, logitRows)
+	if err != nil {
+		return nil, err
+	}
+	s.scratch = scratch
+	s.scratchRows = rows
+	s.scratchLogitRows = logitRows
+	return s.scratch, nil
+}
+
+func (s *metalSession) closeScratch() {
+	if s.scratch != nil {
+		s.scratch.close()
+		s.scratch = nil
+	}
+	s.scratchRows = 0
+	s.scratchLogitRows = 0
 }
 
 func (s *metalSession) close() {
@@ -71,6 +98,7 @@ func (s *metalSession) close() {
 	defer s.mu.Unlock()
 	closeMetalCaches(s.caches)
 	s.caches = nil
+	s.closeScratch()
 }
 
 func (s *metalSession) reset() {
@@ -103,14 +131,26 @@ func (s *Session) runMetalStep(ctx context.Context, tokens []int64, prefill bool
 	if err != nil {
 		return nil, err
 	}
-
-	var updates = make([]*gpu.KVAppend, len(state.caches))
-	defer discardMetalAppends(updates)
-	if out, err = d.metalLogits(ctx, tokens, state.position, state.caches, updates, true); err != nil {
+	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
-	var next = state.position + int64(len(tokens))
+
+	var (
+		rows    = int64(len(tokens))
+		scratch *metalAttentionScratch
+	)
+	if scratch, err = state.acquireScratch(d.metal.device, d.config, rows, 1); err != nil {
+		return nil, fmt.Errorf("llama: allocate Metal attention scratch: %w", err)
+	}
+	var updates = make([]*gpu.KVAppend, len(state.caches))
+	defer discardMetalAppends(updates)
+	if out, err = d.metalLogits(ctx, tokens, state.position, state.caches, updates, scratch, true); err != nil {
+		state.closeScratch()
+		return nil, err
+	}
+	var next = state.position + rows
 	if err = validateSessionLogits(ctx, out, next); err != nil {
+		state.closeScratch()
 		return nil, err
 	}
 

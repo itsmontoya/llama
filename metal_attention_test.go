@@ -346,3 +346,103 @@ func TestMetalAttentionCloseDuringStep(t *testing.T) {
 		t.Fatalf("closed original decoder forward: %v", err)
 	}
 }
+
+func TestMetalSessionScratchReuse(t *testing.T) {
+	var dir = t.TempDir()
+	var config, weights, entries = makeHFCheckpointFixture(t, dir, true)
+	writeHFFixtureTensors(t, dir, safetensors.F32, entries)
+	var decoder = loadTestMetalAttention(t, dir, config.MaxContext)
+	var cpu, err = NewDecoder(config, weights)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var session = newTestMetalAttentionSession(t, decoder, config.MaxContext)
+	var prefix = []int64{1, 10, 4}
+	var row []float32
+	if row, err = session.Prefill(prefix); err != nil {
+		t.Fatal(err)
+	}
+	compareCachedRow(t, cpu, prefix, row)
+	if session.metal.scratch == nil || session.metal.scratchRows != 3 || session.metal.scratchLogitRows != 1 {
+		t.Fatalf("after prefill: scratch=%v rows=%d logitRows=%d", session.metal.scratch, session.metal.scratchRows, session.metal.scratchLogitRows)
+	}
+	var prefillScratch = session.metal.scratch
+
+	// First decode allocates rows=1, logitRows=1 scratch.
+	if row, err = session.Decode(7); err != nil {
+		t.Fatal(err)
+	}
+	compareCachedRow(t, cpu, append(slices.Clone(prefix), 7), row)
+	var decodeScratch = session.metal.scratch
+	if decodeScratch == nil || decodeScratch == prefillScratch || session.metal.scratchRows != 1 || session.metal.scratchLogitRows != 1 {
+		t.Fatalf("after first decode: scratch=%v rows=%d logitRows=%d", decodeScratch, session.metal.scratchRows, session.metal.scratchLogitRows)
+	}
+
+	// Subsequent decodes reuse the exact same scratch instance.
+	if row, err = session.Decode(2); err != nil {
+		t.Fatal(err)
+	}
+	compareCachedRow(t, cpu, append(slices.Clone(prefix), 7, 2), row)
+	if session.metal.scratch != decodeScratch {
+		t.Fatalf("second decode reallocated scratch: got %p, want %p", session.metal.scratch, decodeScratch)
+	}
+
+	// Reset and Prefill with different row count reallocates cleanly.
+	session.Reset()
+	if row, err = session.Prefill(prefix[:2]); err != nil {
+		t.Fatal(err)
+	}
+	compareCachedRow(t, cpu, prefix[:2], row)
+	if session.metal.scratch == nil || session.metal.scratch == decodeScratch || session.metal.scratchRows != 2 {
+		t.Fatalf("after reset+prefill(2): scratch=%p rows=%d", session.metal.scratch, session.metal.scratchRows)
+	}
+
+	// Error during step releases cached scratch and recovers on retry.
+	var submitted, cancelSubmitted = context.WithCancel(t.Context())
+	defer cancelSubmitted()
+	if _, err = session.DecodeContext(cancelAtMetalWait{Context: submitted, cancel: cancelSubmitted}, 3); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled decode: got %v, want context.Canceled", err)
+	}
+	if session.metal.scratch != nil {
+		t.Fatal("expected scratch to be released after failed decode")
+	}
+	if row, err = session.Decode(3); err != nil {
+		t.Fatal(err)
+	}
+	compareCachedRow(t, cpu, append(slices.Clone(prefix[:2]), 3), row)
+	if session.metal.scratch == nil || session.metal.scratchRows != 1 {
+		t.Fatalf("recovery decode: scratch=%v rows=%d", session.metal.scratch, session.metal.scratchRows)
+	}
+
+	// Concurrent sessions each maintain independent scratch without races.
+	var second = newTestMetalAttentionSession(t, decoder, config.MaxContext)
+	var errCh = make(chan error, 2)
+	for _, s := range []*Session{session, second} {
+		go func() {
+			if s.Position() == 0 {
+				if _, pErr := s.Prefill(prefix[:2]); pErr != nil {
+					errCh <- pErr
+					return
+				}
+			}
+			_, dErr := s.Decode(5)
+			errCh <- dErr
+		}()
+	}
+	for range 2 {
+		if gErr := <-errCh; gErr != nil {
+			t.Fatal(gErr)
+		}
+	}
+
+	if err = session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if session.metal.scratch != nil || session.metal.caches != nil {
+		t.Fatal("expected session.Close() to release scratch and caches")
+	}
+	if err = second.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
