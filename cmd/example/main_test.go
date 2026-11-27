@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/itsmontoya/neuralnetwork/gpu"
 )
 
 func TestAnswerQuestions(t *testing.T) {
@@ -49,5 +51,24 @@ func TestRunMetalFlagValidation(t *testing.T) {
 				t.Fatalf("status = %d, stderr = %q, want substring %q", status, stderr.String(), tc.want)
 			}
 		})
+	}
+}
+
+func TestParseMetalWeightDType(t *testing.T) {
+	for _, tc := range []struct {
+		arg  string
+		want gpu.DType
+	}{
+		{"float32", gpu.Float32},
+		{"float16", gpu.Float16},
+		{"bfloat16", gpu.BFloat16},
+		{"q8_0", gpu.Q8_0},
+		{"q4_0", gpu.Q4_0},
+		{"q4_1", gpu.Q4_1},
+	} {
+		got, err := parseMetalWeightDType(tc.arg)
+		if err != nil || got != tc.want {
+			t.Fatalf("parseMetalWeightDType(%q) = %v, %v, want %v", tc.arg, got, err, tc.want)
+		}
 	}
 }

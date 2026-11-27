@@ -46,6 +46,10 @@ func parsePairedMetalBackend(backend string) (opts MetalOptions, isMetal, strict
 		return MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float32}, true, false, nil
 	case "metal-q4_0-kv16":
 		return MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float16}, true, false, nil
+	case "metal-q4_1":
+		return MetalOptions{WeightDType: gpu.Q4_1, KVCacheDType: gpu.Float32}, true, false, nil
+	case "metal-q4_1-kv16":
+		return MetalOptions{WeightDType: gpu.Q4_1, KVCacheDType: gpu.Float16}, true, false, nil
 	default:
 		return MetalOptions{}, false, false, fmt.Errorf("unknown paired backend %q", backend)
 	}

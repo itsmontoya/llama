@@ -47,11 +47,12 @@ func LoadHFModelMetalAttention(ctx context.Context, dir string, maxContext int64
 // LoadHFModelMetalAttentionWithOptions loads a Hugging Face model for resident
 // Metal inference using the requested weight and KV cache storage dtypes.
 // Supported WeightDType values are 0 (Float32), Float32, Float16, BFloat16,
-// Q8_0, and Q4_0. Supported KVCacheDType values are 0 (Float32), Float32, and
-// Float16. Native BF16 checkpoints upload directly to BFloat16 device tensors
-// without FP32 upcast. In quantized weight modes (Q8_0/Q4_0), transformer
-// projections and embeddings (including tied embedding/classifier tables) use
-// the quantized dtype while norms remain Float32. Unavailable builds or devices
+// Q8_0, Q4_0, and Q4_1. Supported KVCacheDType values are 0 (Float32), Float32,
+// and Float16. Native BF16 checkpoints upload directly to BFloat16 device
+// tensors without FP32 upcast. In quantized weight modes (Q8_0/Q4_0/Q4_1),
+// transformer projections and embeddings (including tied embedding/classifier
+// tables) use the quantized dtype while norms remain Float32. Unavailable
+// builds or devices
 // return an error wrapping gpu.ErrUnavailable; invalid options return an error
 // wrapping gpu.ErrInvalid.
 func LoadHFModelMetalAttentionWithOptions(ctx context.Context, dir string, maxContext int64, options MetalOptions) (decoder *Decoder, generation HFGenerationConfig, err error) {

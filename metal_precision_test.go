@@ -205,6 +205,8 @@ func TestMetalAttentionReducedPrecisionSynthetic(t *testing.T) {
 				{"q8_0_kv16", MetalOptions{WeightDType: gpu.Q8_0, KVCacheDType: gpu.Float16}, 0.05},
 				{"q4_0_kv32", MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float32}, 1.0},
 				{"q4_0_kv16", MetalOptions{WeightDType: gpu.Q4_0, KVCacheDType: gpu.Float16}, 1.0},
+				{"q4_1_kv32", MetalOptions{WeightDType: gpu.Q4_1, KVCacheDType: gpu.Float32}, 1.0},
+				{"q4_1_kv16", MetalOptions{WeightDType: gpu.Q4_1, KVCacheDType: gpu.Float16}, 1.0},
 			}
 			for _, mode := range modes {
 				t.Run(mode.name, func(t *testing.T) {
@@ -303,7 +305,7 @@ func TestMetalAttentionQuantRejectsMisalignedDim(t *testing.T) {
 	var config, _, entries = makeHFCheckpointFixture(t, dir, true)
 	writeHFFixtureTensors(t, dir, safetensors.F32, entries)
 	// Fixture has Dim=6 which is not a multiple of 32.
-	for _, dtype := range []gpu.DType{gpu.Q8_0, gpu.Q4_0} {
+	for _, dtype := range []gpu.DType{gpu.Q8_0, gpu.Q4_0, gpu.Q4_1} {
 		var decoder, _, err = LoadHFModelMetalAttentionWithOptions(t.Context(), dir, config.MaxContext, MetalOptions{
 			WeightDType: dtype,
 		})
