@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/itsmontoya/llama/internal/tokenizer"
+	"github.com/itsmontoya/neuralnetwork/gpu"
 )
 
 func TestGenerateArgumentErrors(t *testing.T) {
@@ -54,6 +55,25 @@ func TestGenerateArgumentErrors(t *testing.T) {
 				t.Fatalf("exit = %d, stdout = %q, stderr = %q, want exit 2 mentioning %q", status, stdout.String(), stderr.String(), test.want)
 			}
 		})
+	}
+}
+
+func TestParseMetalWeightDType(t *testing.T) {
+	for _, tc := range []struct {
+		arg  string
+		want gpu.DType
+	}{
+		{"float32", gpu.Float32},
+		{"float16", gpu.Float16},
+		{"bfloat16", gpu.BFloat16},
+		{"q8_0", gpu.Q8_0},
+		{"q4_0", gpu.Q4_0},
+		{"q4_1", gpu.Q4_1},
+	} {
+		got, err := parseMetalWeightDType(tc.arg)
+		if err != nil || got != tc.want {
+			t.Fatalf("parseMetalWeightDType(%q) = %v, %v, want %v", tc.arg, got, err, tc.want)
+		}
 	}
 }
 

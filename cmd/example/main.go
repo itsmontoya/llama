@@ -29,7 +29,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, interactive b
 	maxNewTokens := flags.Int("max-new-tokens", 16, "maximum new tokens per answer")
 	ffnBackend := flags.String("ffn-backend", "cpu", "Hugging Face FFN backend (cpu or metal)")
 	attentionBackend := flags.String("attention-backend", "cpu", "Hugging Face attention backend (cpu or metal with -ffn-backend metal)")
-	metalWeightDType := flags.String("metal-weight-dtype", "float32", "Metal attention weight dtype (float32, float16, bfloat16, q8_0, or q4_0)")
+	metalWeightDType := flags.String("metal-weight-dtype", "float32", "Metal attention weight dtype (float32, float16, bfloat16, q8_0, q4_0, or q4_1)")
 	metalKVDType := flags.String("metal-kv-dtype", "float32", "Metal attention KV cache dtype (float32 or float16)")
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -187,8 +187,10 @@ func parseMetalWeightDType(value string) (gpu.DType, error) {
 		return gpu.Q8_0, nil
 	case "q4_0":
 		return gpu.Q4_0, nil
+	case "q4_1":
+		return gpu.Q4_1, nil
 	default:
-		return 0, fmt.Errorf("-metal-weight-dtype must be float32, float16, bfloat16, q8_0, or q4_0")
+		return 0, fmt.Errorf("-metal-weight-dtype must be float32, float16, bfloat16, q8_0, q4_0, or q4_1")
 	}
 }
 

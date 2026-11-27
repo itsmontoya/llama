@@ -15,7 +15,7 @@ type MetalOptions struct {
 	// WeightDType selects the device storage dtype for transformer projection
 	// weights (Q, K, V, O, gate, up, down, and untied output). Valid values:
 	// 0 (defaults to gpu.Float32), gpu.Float32, gpu.Float16, gpu.BFloat16,
-	// gpu.Q8_0, and gpu.Q4_0.
+	// gpu.Q8_0, gpu.Q4_0, and gpu.Q4_1.
 	WeightDType gpu.DType
 
 	// KVCacheDType selects the device storage dtype for per-session KV caches.
@@ -32,7 +32,7 @@ func (o MetalOptions) resolve() (resolved MetalOptions, err error) {
 		resolved.KVCacheDType = gpu.Float32
 	}
 	switch resolved.WeightDType {
-	case gpu.Float32, gpu.Float16, gpu.BFloat16, gpu.Q8_0, gpu.Q4_0:
+	case gpu.Float32, gpu.Float16, gpu.BFloat16, gpu.Q8_0, gpu.Q4_0, gpu.Q4_1:
 	default:
 		return MetalOptions{}, fmt.Errorf("llama: unsupported Metal weight dtype %v: %w", resolved.WeightDType, gpu.ErrInvalid)
 	}
